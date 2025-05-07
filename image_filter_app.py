@@ -276,10 +276,7 @@ class ImageFilterApp(QWidget):
             QMessageBox.warning(self, "No Prompt", "Please enter a prompt.")
             return
         include_subfolders = self.include_subfolder_checkbox.isChecked()
-
-        self.OLLAMA_API_URL = self.ollama_url_edit.text().strip()
-        self.MODEL_NAME = self.model_combo.currentText().strip()
-        temp = self.temp_spin.value() / 100.0
+        temp = 0.0  # ใช้ค่า temperature คงที่
 
         # Clear previous thumbnails
         for i in reversed(range(self.grid_layout.count())):

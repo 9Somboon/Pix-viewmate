@@ -1,171 +1,17 @@
 import sys
 import os
-import base64
-import json
-import requests
 import threading
-
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
-                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout)
-from PyQt6.QtGui import QPixmap, QPainter
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-
-# --- Helper functions ---
-
-def image_to_base64(image_path: str) -> str | None:
-    try:
-        with open(image_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("utf-8")
-        return encoded
-    except Exception as e:
-        print(f"Error encoding {image_path}: {e}")
-        return None
-
-def create_square_pixmap(pixmap: QPixmap, size: int) -> QPixmap:
-    """
-    Create a square pixmap from the given pixmap, maintaining aspect ratio.
-    The image is centered and padded with white background if needed.
-    """
-    # Get original size
-    orig_width = pixmap.width()
-    orig_height = pixmap.height()
-    
-    # Create a square pixmap with white background
-    square_pixmap = QPixmap(size, size)
-    square_pixmap.fill(Qt.GlobalColor.white)
-    
-    # Calculate scaled size while maintaining aspect ratio
-    if orig_width > orig_height:
-        scaled_width = size
-        scaled_height = int(orig_height * size / orig_width)
-    else:
-        scaled_height = size
-        scaled_width = int(orig_width * size / orig_height)
-    
-    # Scale the original pixmap
-    scaled_pixmap = pixmap.scaled(scaled_width, scaled_height, 
-                                  Qt.AspectRatioMode.KeepAspectRatio, 
-                                  Qt.TransformationMode.SmoothTransformation)
-    
-    # Calculate position to center the scaled pixmap
-    x = (size - scaled_width) // 2
-    y = (size - scaled_height) // 2
-    
-    # Draw the scaled pixmap onto the square pixmap
-    painter = QPainter(square_pixmap)
-    painter.drawPixmap(x, y, scaled_pixmap)
-    painter.end()
-    
-    return square_pixmap
-
-def ask_ollama_about_image(ollama_api_url: str, model_name: str, image_base64: str, user_prompt_object: str, temp: float) -> bool:
-    payload = {
-        "model": model_name,
-        "prompt": f"Analyze the provided image carefully. Does this image contain a {user_prompt_object}? Please answer with only 'YES' or 'NO'.",
-        "images": [image_base64],
-        "stream": False,
-        "options": {"temperature": temp}
-    }
-    try:
-        response = requests.post(
-            ollama_api_url,
-            json=payload,
-            timeout=90
-        )
-        response.raise_for_status()
-        data = response.json()
-        answer = data.get("response", "").strip().upper()
-        return "YES" in answer and "NO" not in answer
-    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-        print(f"Ollama API error: {e}")
-        return False
-
-# --- FilterWorker QThread class ---
-
-class FilterWorker(QThread):
-    progress_update = pyqtSignal(str)
-    image_matched = pyqtSignal(str)
-    finished = pyqtSignal(list)
-    show_processing_preview = pyqtSignal(str)
-
-    def __init__(self, folder_path, user_prompt, ollama_api_url, model_name, include_subfolders, temp, app_ref=None):
-        super().__init__()
-        self.folder_path = folder_path
-        self.user_prompt = user_prompt
-        self.ollama_api_url = ollama_api_url
-        self.model_name = model_name
-        self.include_subfolders = include_subfolders
-        self.temp = temp
-        self._pause_event = threading.Event()
-        self._pause_event.set()  # Not paused initially
-        self._stop_event = threading.Event()
-        self.app_ref = app_ref
-
-    def pause(self):
-        self._pause_event.clear()
-
-    def resume(self):
-        self._pause_event.set()
-
-    def stop(self):
-        self._stop_event.set()
-        self._pause_event.set()  # In case it's paused
-
-    def run(self):
-        matched = []
-        if not os.path.isdir(self.folder_path):
-            self.progress_update.emit("Error: Selected folder does not exist.")
-            self.finished.emit(matched)
-            return
-
-        image_exts = (".png", ".jpg", ".jpeg")
-        image_files = []
-        for root, _, files in os.walk(self.folder_path):
-            for f in files:
-                if f.lower().endswith(image_exts):
-                    image_files.append(os.path.join(root, f))
-            if not self.include_subfolders:
-                break
-
-        total = len(image_files)
-        if total == 0:
-            self.progress_update.emit("No images found in the selected folder.")
-            self.finished.emit(matched)
-            return
-
-        for idx, path in enumerate(image_files, 1):
-            if self._stop_event.is_set():
-                self.progress_update.emit("Stopped by user.")
-                break
-            self._pause_event.wait()  # Block here if paused
-            filename = os.path.basename(path)
-            self.progress_update.emit(f"Processing {filename} ({idx}/{total})...")
-            self.show_processing_preview.emit(path)
-            img_b64 = image_to_base64(path)
-            if img_b64 is None:
-                self.progress_update.emit(f"Failed to read {filename}. Skipping.")
-                continue
-            try:
-                found = ask_ollama_about_image(
-                    self.ollama_api_url, self.model_name, img_b64, self.user_prompt, self.temp
-                )
-            except Exception as e:
-                self.progress_update.emit(f"Error processing {filename}: {e}")
-                continue
-            if found:
-                matched.append(path)
-                self.image_matched.emit(path)
-                self.progress_update.emit(f"Found '{self.user_prompt}' in {filename}.")
-            else:
-                self.progress_update.emit(f"Not found in {filename}.")
-        self.finished.emit(matched)
-
-# --- ImageFilterApp QWidget class ---
+                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar)
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
+from worker import FilterWorker
+import requests
+from clickable_image_label import ClickableImageLabel
 
 class ImageFilterApp(QWidget):
     OLLAMA_API_URL = "http://192.168.50.55:11434"
-    MODEL_NAME = "gemma3:4b-it-qat"
 
     def __init__(self):
         super().__init__()
@@ -174,6 +20,7 @@ class ImageFilterApp(QWidget):
         self.folder_path = ""
         self.worker = None
         self.setAcceptDrops(True)  # Enable drag and drop
+        self.selected_images = []  # List to store selected image paths
 
         # Tabs
         self.tabs = QTabWidget()
@@ -185,6 +32,7 @@ class ImageFilterApp(QWidget):
         # Main tab layout
         main_layout = QVBoxLayout(self.main_tab)
         top_layout = QHBoxLayout()
+        file_type_layout = QHBoxLayout()
         prompt_layout = QHBoxLayout()
 
         # Folder selection
@@ -198,7 +46,25 @@ class ImageFilterApp(QWidget):
         # Include subfolders checkbox
         self.include_subfolder_checkbox = QCheckBox("Include Subfolders")
         self.include_subfolder_checkbox.setChecked(False)
+        
+        # Theme toggle button
+        self.theme_toggle_btn = QPushButton("🌞")  # Sun emoji for light theme
+        self.theme_toggle_btn.setFixedSize(30, 30)
+        self.theme_toggle_btn.clicked.connect(self.toggle_theme)
+        
         top_layout.addWidget(self.include_subfolder_checkbox)
+        top_layout.addWidget(self.theme_toggle_btn)
+
+        # File type selection
+        self.file_type_label = QLabel("File Type:")
+        self.png_checkbox = QCheckBox("PNG")
+        self.jpg_checkbox = QCheckBox("JPG")
+        # By default, both are checked
+        self.png_checkbox.setChecked(True)
+        self.jpg_checkbox.setChecked(True)
+        file_type_layout.addWidget(self.file_type_label)
+        file_type_layout.addWidget(self.png_checkbox)
+        file_type_layout.addWidget(self.jpg_checkbox)
 
         # Prompt input
         self.prompt_edit = QLineEdit()
@@ -222,10 +88,22 @@ class ImageFilterApp(QWidget):
         status_preview_layout = QHBoxLayout()
         self.status_label = QLabel("Ready.")
         self.status_label.setWordWrap(True)
+        self.model_label = QLabel("")  # สำหรับแสดงชื่อโมเดลปัจจุบัน
+        self.model_label.setWordWrap(True)
         self.processing_preview_label = QLabel()
         self.processing_preview_label.setFixedSize(64, 64)
         status_preview_layout.addWidget(self.status_label)
+        status_preview_layout.addWidget(self.model_label)
         status_preview_layout.addWidget(self.processing_preview_label)
+
+        # Progress bar and info
+        progress_layout = QHBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_info_label = QLabel("")
+        self.progress_info_label.setWordWrap(True)
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.progress_info_label)
 
         # Scroll area for thumbnails
         self.scroll_area = QScrollArea()
@@ -237,8 +115,10 @@ class ImageFilterApp(QWidget):
 
         # Assemble main tab
         main_layout.addLayout(top_layout)
+        main_layout.addLayout(file_type_layout)
         main_layout.addLayout(prompt_layout)
         main_layout.addLayout(status_preview_layout)
+        main_layout.addLayout(progress_layout)
         main_layout.addWidget(self.scroll_area)
 
         # Settings tab layout
@@ -253,6 +133,13 @@ class ImageFilterApp(QWidget):
         settings_layout.addRow("Ollama URL:", self.ollama_url_edit)
         settings_layout.addRow("Model:", self.model_combo)
         settings_layout.addRow("Temperature:", self.temp_spin)
+
+        # Max workers setting
+        self.max_workers_spin = QSpinBox()
+        self.max_workers_spin.setRange(1, 16)
+        self.max_workers_spin.setValue(4)
+        self.max_workers_spin.setSuffix(" workers")
+        settings_layout.addRow("Max Concurrent Workers:", self.max_workers_spin)
         
         # Refresh model button
         self.refresh_model_btn = QPushButton("Refresh Models")
@@ -289,8 +176,14 @@ class ImageFilterApp(QWidget):
                 print(f"Models: {models}")
                 self.model_combo.clear()
                 self.model_combo.addItems(models)
-                if self.MODEL_NAME in models:
-                    self.model_combo.setCurrentText(self.MODEL_NAME)
+                if models:
+                    # พยายามตั้งค่าโมเดลปัจจุบันถ้ามีอยู่ในลิสต์ หรือเลือกตัวแรก
+                    current_model = self.model_combo.currentText()
+                    if current_model and current_model in models:
+                        self.model_label.setText(f"Model: {current_model}")
+                    else:
+                        self.model_combo.setCurrentIndex(0)
+                        self.model_label.setText(f"Model: {self.model_combo.currentText()}")
             except Exception as e:
                 print(f"Error fetching models: {e}")
                 self.model_combo.clear()
@@ -356,13 +249,46 @@ class ImageFilterApp(QWidget):
             ollama_base_url = ollama_base_url[:-len("/api/tags")]
         ollama_api_url = ollama_base_url + "/api/generate"
         
+        # ดึงค่าประเภทไฟล์ที่ผู้ใช้เลือก
+        png_checked = self.png_checkbox.isChecked()
+        jpg_checked = self.jpg_checkbox.isChecked()
+        
+        # กำหนดประเภทไฟล์ตามที่เลือก
+        if png_checked and jpg_checked:
+            file_type = "both"
+        elif png_checked:
+            file_type = "png"
+        elif jpg_checked:
+            file_type = "jpg"
+        else:
+            # หากไม่ได้เลือกประเภทไฟล์ใดเลย ให้แสดงข้อความแจ้งเตือน
+            QMessageBox.warning(self, "No File Type", "Please select at least one file type (PNG or JPG).")
+            self.filter_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+            return
+        
+        # ดึงชื่อโมเดลที่เลือกจาก ComboBox
+        selected_model = self.model_combo.currentText()
+        if not selected_model or selected_model == "(fetch failed)":
+            QMessageBox.warning(self, "No Model", "Please select a valid model from the Settings tab.")
+            self.filter_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+            return
+
+        # อัปเดตชื่อโมเดลในแถบทดแทนสถานะ
+        self.model_label.setText(f"Model: {selected_model}")
+        
+        max_workers = self.max_workers_spin.value()
         self.worker = FilterWorker(
-            self.folder_path, prompt, ollama_api_url, self.MODEL_NAME, include_subfolders, temp
+            self.folder_path, prompt, ollama_api_url, selected_model, include_subfolders, temp, file_type, max_workers
         )
         self.worker.progress_update.connect(self.update_status_and_log)
         self.worker.image_matched.connect(self.add_matched_image_to_display)
         self.worker.finished.connect(self.filtering_finished)
         self.worker.show_processing_preview.connect(self.show_processing_preview)
+        self.worker.progress_info.connect(self.update_progress_info)
         self.worker.start()
 
     def toggle_pause_resume(self):
@@ -385,17 +311,23 @@ class ImageFilterApp(QWidget):
             self.stop_btn.setEnabled(False)
 
     def update_status_and_log(self, message: str):
-        self.status_label.setText(message)
-        print(message)
+        # Prevent status label from flickering too fast during concurrent processing
+        if message.startswith("Found") or message.startswith("Not found"):
+             # We can just print these to the console log without updating the main status label
+             print(message)
+        else:
+             self.status_label.setText(message)
+             print(message)
 
     def add_matched_image_to_display(self, image_path: str):
-        label = QLabel()
+        label = ClickableImageLabel(image_path)
         pixmap = QPixmap(image_path)
         if not pixmap.isNull():
-            # Use the new square pixmap function
-            pixmap = create_square_pixmap(pixmap, 256)
+            pixmap = pixmap.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             label.setPixmap(pixmap)
             label.setFixedSize(256, 256)
+            # Connect the clicked signal
+            label.clicked.connect(self.on_image_clicked)
         else:
             label.setText("Failed to load image")
         idx = self.grid_layout.count()
@@ -410,6 +342,25 @@ class ImageFilterApp(QWidget):
         else:
             self.processing_preview_label.clear()
 
+    def update_progress_info(self, current, total, eta_seconds):
+        # อัปเดต QProgressBar
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        
+        # อัปเดตข้อมูลความคืบหน้า
+        if eta_seconds > 0:
+            # แปลงวินาทีเป็นรูปแบบอ่านง่าย
+            if eta_seconds < 60:
+                eta_str = f"{eta_seconds:.0f}s"
+            elif eta_seconds < 360:
+                eta_str = f"{eta_seconds/60:.1f}m"
+            else:
+                eta_str = f"{eta_seconds/3600:.1f}h"
+            self.progress_info_label.setText(f"Processed {current}/{total} files - ETA: {eta_str}")
+        else:
+            self.progress_info_label.setText(f"Processed {current}/{total} files")
+
     def filtering_finished(self, matched_paths: list):
         n = len(matched_paths)
         self.status_label.setText(f"Finished. Found {n} image(s).")
@@ -419,11 +370,110 @@ class ImageFilterApp(QWidget):
         if n == 0:
             QMessageBox.information(self, "No Matches", "No images matched the prompt.")
         self.worker = None
-
-# --- Main execution block ---
-
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    window = ImageFilterApp()
-    window.show()
-    sys.exit(app.exec())
+    
+    def toggle_theme(self):
+        # ฟังก์ชันสำหรับสลับธีม dark/light
+        if not hasattr(self, 'dark_theme'):
+            self.dark_theme = False
+            
+        # สลับค่า theme
+        self.dark_theme = not self.dark_theme
+        
+        if self.dark_theme:
+            # ธีม dark
+            self.theme_toggle_btn.setText("🌙")  # Moon emoji
+            stylesheet = """
+                QWidget {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                }
+                QPushButton {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    border: 1px solid #5c5c5c;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #4c4c4c;
+                }
+                QPushButton:pressed {
+                    background-color: #5c5c5c;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #5c5c5c;
+                }
+                QTabBar::tab {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    padding: 5px;
+                }
+                QTabBar::tab:selected {
+                    background-color: #2b2b2b;
+                }
+                QScrollArea {
+                    background-color: #2b2b2b;
+                }
+                QProgressBar {
+                    border: 1px solid #5c5c5c;
+                    background-color: #3c3c3c;
+                }
+                QProgressBar::chunk {
+                    background-color: #0078D7;
+                }
+            """
+        else:
+            # ธีม light (default)
+            self.theme_toggle_btn.setText("🌞")  # Sun emoji
+            stylesheet = """
+                QWidget {
+                    background-color: #ffffff;
+                    color: #000000;
+                }
+                QPushButton {
+                    background-color: #f0f0f0;
+                    color: #000000;
+                    border: 1px solid #c0c0c0;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #e0e0e0;
+                }
+                QPushButton:pressed {
+                    background-color: #d0d0d0;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #c0c0c0;
+                }
+                QTabBar::tab {
+                    background-color: #f0f0f0;
+                    color: #000000;
+                    padding: 5px;
+                }
+                QTabBar::tab:selected {
+                    background-color: #ffffff;
+                }
+                QScrollArea {
+                    background-color: #ffffff;
+                }
+                QProgressBar {
+                    border: 1px solid #c0c0c0;
+                    background-color: #f0f0f0;
+                }
+                QProgressBar::chunk {
+                    background-color: #0078D7;
+                }
+            """
+        
+        # ใช้ stylesheet
+        self.setStyleSheet(stylesheet)
+    
+    def on_image_clicked(self, image_path: str):
+        # Handle image click - add or remove from selected images list
+        if image_path in self.selected_images:
+            self.selected_images.remove(image_path)
+            # Update status to show number of selected images
+            self.status_label.setText(f"Unselected image. {len(self.selected_images)} images selected.")
+        else:
+            self.selected_images.append(image_path)
+            # Update status to show number of selected images
+            self.status_label.setText(f"Selected image: {os.path.basename(image_path)}. {len(self.selected_images)} images selected.")

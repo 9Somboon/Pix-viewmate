@@ -87,12 +87,17 @@ class FilterWorker(QThread):
                 self.progress_update.emit(f"Error processing {os.path.basename(path)}: {e}")
                 return path, False
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {executor.submit(process_image, path): path for path in image_files}
+        # Create executor and submit all tasks
+        executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        futures = {executor.submit(process_image, path): path for path in image_files}
 
+        try:
             for future in as_completed(futures):
                 if self._stop_event.is_set():
                     self.progress_update.emit("Stopping workers...")
+                    # Cancel all pending futures
+                    for f in futures:
+                        f.cancel()
                     break
                 
                 path, found = future.result()
@@ -109,6 +114,9 @@ class FilterWorker(QThread):
                     self.progress_update.emit(f"Found: {filename}")
                 else:
                     self.progress_update.emit(f"Not found: {filename}")
+        finally:
+            # Properly shutdown the executor
+            executor.shutdown(wait=True)
 
         if self._stop_event.is_set():
             self.progress_update.emit("Stopped by user.")

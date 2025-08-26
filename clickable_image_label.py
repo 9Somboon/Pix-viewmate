@@ -11,7 +11,7 @@ class ClickableImageLabel(QLabel):
         super().__init__(parent)
         self.image_path = image_path
         self.selected = False
-        self.setStyleSheet("border: 2px solid transparent;")  # Default border
+        # self.setStyleSheet("border: 2px solid transparent;")  # Default border
         
     def setPixmap(self, pixmap):
         # Store original pixmap for redrawing with highlight
@@ -33,9 +33,9 @@ class ClickableImageLabel(QLabel):
                 # Create a highlighted version of the pixmap
                 pixmap = self.original_pixmap.copy()
                 painter = QPainter(pixmap)
-                pen = QPen(QColor(0, 120, 215), 4)  # Blue border for selection
+                pen = QPen(QColor(0, 122, 255), 3)  # Blue border for selection (macOS blue)
                 painter.setPen(pen)
-                painter.drawRect(2, 2, pixmap.width() - 4, pixmap.height() - 4)
+                painter.drawRect(1, 1, pixmap.width() - 2, pixmap.height() - 2)
                 painter.end()
                 super().setPixmap(pixmap)
             else:
@@ -45,14 +45,16 @@ class ClickableImageLabel(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             self.selected = not self.selected
             self.update_pixmap()
-            self.setStyleSheet("border: 2px solid #0078D7;" if self.selected else "border: 2px solid transparent;")
+            # Use macOS-style blue border for selection
+            # self.setStyleSheet("border: 2px solid #007AFF;" if self.selected else "border: 2px solid transparent;")
             self.clicked.emit(self.image_path)
         super().mousePressEvent(event)
         
     def setSelected(self, selected):
         self.selected = selected
         self.update_pixmap()
-        self.setStyleSheet("border: 2px solid #0078D7;" if self.selected else "border: 2px solid transparent;")
+        # Use macOS-style blue border for selection
+        # self.setStyleSheet("border: 2px solid #007AFF;" if self.selected else "border: 2px solid transparent;")
 
 
 if __name__ == "__main__":

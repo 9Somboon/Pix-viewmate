@@ -37,6 +37,10 @@ class FilterWorker(QThread):
         self._stop_event.set()
         self._pause_event.set()  # In case it's paused
 
+    def is_running(self):
+        """Check if the worker is currently running."""
+        return self.isRunning()
+
     def run(self):
         matched = []
         if not os.path.isdir(self.folder_path):

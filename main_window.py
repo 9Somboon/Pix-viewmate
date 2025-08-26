@@ -1,6 +1,7 @@
 import sys
 import os
 import threading
+import json
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
                              QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider)
@@ -13,6 +14,38 @@ from clickable_image_label import ClickableImageLabel
 class ImageFilterApp(QWidget):
     OLLAMA_API_URL = "http://192.168.50.55:11434"
 
+    def save_settings(self):
+        settings = {
+            "ollama_url": self.ollama_url_edit.text(),
+            "selected_model": self.model_combo.currentText(),
+            "temperature": self.temp_spin.value(),
+            "max_workers": self.max_workers_spin.value()
+        }
+        
+        with open("app_settings.json", "w") as f:
+            json.dump(settings, f, indent=2)
+
+    def load_settings(self):
+        try:
+            with open("app_settings.json", "r") as f:
+                settings = json.load(f)
+            
+            self.ollama_url_edit.setText(settings.get("ollama_url", self.OLLAMA_API_URL))
+            self.temp_spin.setValue(settings.get("temperature", 0))
+            self.max_workers_spin.setValue(settings.get("max_workers", 4))
+            
+            # โหลดโมเดลที่เลือกไว้หลังจากดึงรายการโมเดลจาก API
+            selected_model = settings.get("selected_model", "")
+            if selected_model:
+                # เก็บค่าไว้ชั่วคราวจนกว่าจะโหลดโมเดลจาก API เสร็จ
+                self.pending_selected_model = selected_model
+        except FileNotFoundError:
+            # ถ้าไม่มีไฟล์การตั้งค่า ให้ใช้ค่าเริ่มต้น
+            self.pending_selected_model = ""
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+            self.pending_selected_model = ""
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Filter with Ollama")
@@ -21,6 +54,9 @@ class ImageFilterApp(QWidget):
         self.worker = None
         self.setAcceptDrops(True)  # Enable drag and drop
         self.selected_images = []  # List to store selected image paths
+
+        # Load settings
+        self.load_settings()
 
         # Set default theme to dark
         self.dark_theme = True
@@ -127,14 +163,6 @@ class ImageFilterApp(QWidget):
         progress_layout.addSpacing(10)  # เพิ่มระยะห่างระหว่าง progress bar และ progress info label
         progress_layout.addWidget(self.progress_info_label)
 
-        # Scroll area for thumbnails
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.thumbs_widget = QWidget()
-        self.grid_layout = QGridLayout()
-        self.thumbs_widget.setLayout(self.grid_layout)
-        self.scroll_area.setWidget(self.thumbs_widget)
-
         # Slider for thumbnail size
         self.thumbnail_slider = QSlider(Qt.Orientation.Horizontal)
         self.thumbnail_slider.setMinimum(64)
@@ -143,6 +171,35 @@ class ImageFilterApp(QWidget):
         self.thumbnail_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.thumbnail_slider.setTickInterval(64)
         self.thumbnail_slider.valueChanged.connect(self.update_thumbnail_size)
+        
+        # Set slider to a smaller size
+        self.thumbnail_slider.setFixedWidth(150)
+        self.thumbnail_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #ddd;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078D7;
+                border: 1px solid #0078D7;
+                width: 12px;
+                margin: -6px 0;
+                border-radius: 6px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #0078D7;
+                border-radius: 3px;
+            }
+        """)
+        
+        # Scroll area for thumbnails
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.thumbs_widget = QWidget()
+        self.grid_layout = QGridLayout()
+        self.thumbs_widget.setLayout(self.grid_layout)
+        self.scroll_area.setWidget(self.thumbs_widget)
 
         # Assemble main tab
         main_layout.addLayout(top_layout)
@@ -150,8 +207,14 @@ class ImageFilterApp(QWidget):
         main_layout.addLayout(status_preview_layout)
         main_layout.addLayout(progress_layout)
         main_layout.addWidget(self.scroll_area)
-        main_layout.addWidget(self.thumbnail_slider)
-
+        
+        # Add thumbnail slider at the bottom right of the window
+        slider_layout = QHBoxLayout()
+        slider_layout.addStretch()  # Add stretch to push slider to the right
+        slider_layout.addWidget(self.thumbnail_slider)
+        main_layout.addLayout(slider_layout)
+        
+        
         # Settings tab layout
         settings_layout = QFormLayout(self.settings_tab)
         self.ollama_url_edit = QLineEdit(self.OLLAMA_API_URL)
@@ -175,6 +238,11 @@ class ImageFilterApp(QWidget):
         # Refresh model button
         self.refresh_model_btn = QPushButton("Refresh Models")
         settings_layout.addRow("", self.refresh_model_btn)
+        
+        # Save settings button
+        self.save_settings_btn = QPushButton("Save Settings")
+        self.save_settings_btn.clicked.connect(self.save_settings)
+        settings_layout.addRow("", self.save_settings_btn)
 
         # Main layout
         layout = QVBoxLayout(self)
@@ -184,6 +252,8 @@ class ImageFilterApp(QWidget):
 
         self.fetch_ollama_models()
         self.refresh_model_btn.clicked.connect(self.fetch_ollama_models)
+        self.save_settings_btn.clicked.connect(self.save_settings)
+        self.model_combo.currentTextChanged.connect(self.on_model_changed)
 
     def fetch_ollama_models(self):
         print("Fetch ollama models called")
@@ -209,11 +279,14 @@ class ImageFilterApp(QWidget):
                 self.model_combo.clear()
                 self.model_combo.addItems(models)
                 if models:
-                    # พยายามตั้งค่าโมเดลปัจจุบันถ้ามีอยู่ในลิสต์ หรือเลือกตัวแรก
-                    current_model = self.model_combo.currentText()
-                    if current_model and current_model in models:
-                        self.model_label.setText(f"Model: {current_model}")
-                    else:
+                    # ถ้ามีโมเดลที่เลือกไว้ชั่วคราว ให้ตั้งค่า
+                    if hasattr(self, 'pending_selected_model') and self.pending_selected_model:
+                        if self.pending_selected_model in models:
+                            self.model_combo.setCurrentText(self.pending_selected_model)
+                            self.model_label.setText(f"Model: {self.pending_selected_model}")
+                        self.pending_selected_model = ""
+                    # ถ้าไม่มีการตั้งค่าชั่วคราว ให้เลือกตัวแรก
+                    elif not self.model_combo.currentText():
                         self.model_combo.setCurrentIndex(0)
                         self.model_label.setText(f"Model: {self.model_combo.currentText()}")
             except Exception as e:
@@ -221,6 +294,10 @@ class ImageFilterApp(QWidget):
                 self.model_combo.clear()
                 self.model_combo.addItem("(fetch failed)")
         threading.Thread(target=fetch, daemon=True).start()
+
+    def on_model_changed(self):
+        # อัปเดตชื่อโมเดลในแถบทดแทนสถานะเมื่อมีการเลือกโมเดลใหม่
+        self.model_label.setText(f"Model: {self.model_combo.currentText()}")
 
     def dragEnterEvent(self, event):
         if (event.mimeData().hasUrls()):
@@ -256,6 +333,24 @@ class ImageFilterApp(QWidget):
         if not prompt:
             QMessageBox.warning(self, "No Prompt", "Please enter a prompt.")
             return
+        
+        # ตรวจสอบการเชื่อมต่อกับ Ollama API ก่อนเริ่มการกรอง
+        ollama_base_url = self.ollama_url_edit.text().rstrip("/")
+        # ตรวจสอบว่า ollama_base_url ลงท้ายด้วย /api/generate หรือไม่ ถ้าใช่ให้ตัดออก
+        if ollama_base_url.endswith("/api/generate"):
+            ollama_base_url = ollama_base_url[:-len("/api/generate")]
+        # ตรวจสอบว่า ollama_base_url ลงท้ายด้วย /api/tags หรือไม่ ถ้าใช่ให้ตัดออก
+        if ollama_base_url.endswith("/api/tags"):
+            ollama_base_url = ollama_base_url[:-len("/api/tags")]
+        ollama_api_url = ollama_base_url + "/api/generate"
+        
+        try:
+            resp = requests.get(ollama_base_url, timeout=5)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            QMessageBox.critical(self, "Connection Error", f"Failed to connect to Ollama API at {ollama_base_url}. Please check your network connection and Ollama server status.\n\nError: {str(e)}")
+            return
+        
         include_subfolders = self.include_subfolder_checkbox.isChecked()
         temp = 0.0  # ใช้ค่า temperature คงที่
 
@@ -311,6 +406,9 @@ class ImageFilterApp(QWidget):
 
         # อัปเดตชื่อโมเดลในแถบทดแทนสถานะ
         self.model_label.setText(f"Model: {selected_model}")
+        
+        # บันทึกการตั้งค่า
+        self.save_settings()
         
         max_workers = self.max_workers_spin.value()
         self.worker = FilterWorker(
@@ -461,251 +559,456 @@ class ImageFilterApp(QWidget):
             # ธีม dark
             self.theme_toggle_btn.setText("🌙")  # Moon emoji
             stylesheet = """
+                /* ใช้ฟอนต์ San Francisco ถ้ามี หรือฟอนต์ sans-serif ทั่วไป */
                 QWidget {
-                    background-color: #2b2b2b;
-                    color: #ffffff;
-                    font-family: "Segoe UI", sans-serif;
-                    font-size: 14px;
+                    /* font-family: -apple-system, BlinkMacSystemFont, "San Francisco", "Helvetica Neue", sans-serif; */
+                    /* font-size: 13px; */
+                    /* color: #FFFFFF; */
+                    /* background-color: #2B2B2B; */
                 }
+                
+                /* ปุ่มรอง (Secondary Button) */
                 QPushButton {
-                    background-color: #3c3c3c;
-                    color: #ffffff;
-                    border: 1px solid #5c5c5c;
-                    border-radius: 4px;
-                    padding: 8px 16px;
-                    font-weight: 500;
-                    font-size: 14px;
+                    /* background-color: #4A4A4A; */ /* สีเทาเข้มของ macOS */
+                    /* color: #FFFFFF; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 8px 16px; */
+                    /* font-size: 13px; */
+                    /* font-weight: 400; */
                 }
+                
                 QPushButton:hover {
-                    background-color: #4c4c4c;
-                    border: 1px solid #7c7c7c;
+                    /* background-color: #5A5A5A; */ /* สีเข้มขึ้นเมื่อ hover */
                 }
+                
                 QPushButton:pressed {
-                    background-color: #5c5c5c;
-                    border: 1px solid #9c9c9c;
+                    /* background-color: #3A3A3A; */ /* สีเข้มขึ้นเมื่อกด */
                 }
-                QPushButton#primary {
-                    background-color: #0078D7;
-                    color: #ffffff;
-                    border: 1px solid #0078D7;
+                
+                /* ปุ่มหลัก (Primary Button) */
+                QPushButton#primary, QPushButton#filter_btn, QPushButton#browse_btn, QPushButton#refresh_model_btn {
+                    /* background-color: #0A84FF; */ /* สีฟ้าของ macOS */
+                    /* color: white; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 8px 16px; */
+                    /* font-size: 13px; */
+                    /* font-weight: 500; */
                 }
-                QPushButton#primary:hover {
-                    background-color: #0066B4;
-                    border: 1px solid #006B4;
+                
+                QPushButton#primary:hover, QPushButton#filter_btn:hover, QPushButton#browse_btn:hover, QPushButton#refresh_model_btn:hover {
+                    /* background-color: #007AFF; */ /* สีเข้มขึ้นเมื่อ hover */
                 }
-                QPushButton#primary:pressed {
-                    background-color: #005599;
-                    border: 1px solid #005599;
+                
+                QPushButton#primary:pressed, QPushButton#filter_btn:pressed, QPushButton#browse_btn:pressed, QPushButton#refresh_model_btn:pressed {
+                    /* background-color: #0062CC; */ /* สีเข้มขึ้นเมื่อกด */
                 }
+                
+                /* ปุ่มควบคุม (Control Buttons) */
+                QPushButton#pause_btn, QPushButton#stop_btn {
+                    /* background-color: #4A4A4A; */
+                    /* color: #FFFFFF; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 6px 12px; */
+                    /* font-size: 12px; */
+                    /* font-weight: 400; */
+                }
+                
+                QPushButton#pause_btn:hover, QPushButton#stop_btn:hover {
+                    /* background-color: #5A5A5A; */
+                }
+                
+                QPushButton#pause_btn:pressed, QPushButton#stop_btn:pressed {
+                    /* background-color: #3A3A3A; */
+                }
+                
+                /* ปุ่ม Theme Toggle */
+                QPushButton#theme_toggle_btn {
+                    /* background-color: transparent; */
+                    /* color: #FFFFFF; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 6px 12px; */
+                    /* font-size: 16px; */
+                    /* font-weight: 400; */
+                }
+                
+                QPushButton#theme_toggle_btn:hover {
+                    /* background-color: rgba(255, 255, 255, 0.1); */
+                }
+                
+                QPushButton#theme_toggle_btn:pressed {
+                    /* background-color: rgba(255, 255, 255, 0.2); */
+                }
+                
+                /* Label */
                 QLabel {
-                    font-size: 14px;
+                    /* color: #FFFFFF; */
+                    /* font-size: 13px; */
                 }
-                QLabel#title {
-                    font-size: 16px;
-                    font-weight: bold;
-                }
+                
                 QLabel#status {
-                    font-size: 13px;
+                    /* color: #CCCCCC; */
+                    /* font-size: 12px; */
+                    /* background-color: #3A3A3A; */
+                    /* padding: 6px 8px; */
+                    /* border-radius: 4px; */
                 }
+                
+                /* Tab Widget */
                 QTabWidget::pane {
-                    border: 1px solid #5c5c5c;
-                    border-radius: 4px;
+                    border: 1px solid #4A4A4A;
+                    border-radius: 6px;
+                    background-color: #2B2B2B;
                 }
+                
                 QTabBar::tab {
-                    background-color: #3c3c3c;
-                    color: #ffffff;
-                    padding: 8px 16px;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-                    border: 1px solid #5c5c5c;
-                    font-size: 14px;
-                    margin-right: 2px;
+                    /* background-color: #3A3A3A; */
+                    /* color: #CCCCCC; */
+                    /* padding: 8px 16px; */
+                    /* border-top-left-radius: 6px; */
+                    /* border-top-right-radius: 6px; */
+                    /* border: 1px solid #4A4A4A; */
+                    /* font-size: 13px; */
+                    /* font-weight: 400; */
+                    /* margin-right: 2px; */
                 }
+                
                 QTabBar::tab:selected {
-                    background-color: #2b2b2b;
-                    font-weight: bold;
-                    border-bottom: none;
+                    /* background-color: #2B2B2B; */
+                    /* color: #FFFFFF; */
+                    /* font-weight: 500; */
+                    /* border-bottom: none; */
                 }
+                
+                QTabBar::tab:hover:!selected {
+                    /* background-color: #4A4A4A; */
+                }
+                
+                /* Scroll Area */
                 QScrollArea {
-                    background-color: #2b2b2b;
+                    /* border: none; */
+                    /* background-color: #2B2B2B; */
                 }
+                
+                QScrollBar:vertical {
+                    /* border: none; */
+                    /* background: transparent; */
+                    /* width: 8px; */
+                    /* margin: 0px 0px 0px; */
+                }
+                
+                QScrollBar::handle:vertical {
+                    /* background: rgba(255, 255, 255, 0.3); */
+                    /* border-radius: 4px; */
+                    /* min-height: 20px; */
+                }
+                
+                QScrollBar::handle:vertical:hover {
+                    /* background: rgba(255, 255, 255, 0.5); */
+                }
+                
+                QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
+                    /* height: 0px; */
+                }
+                
+                /* ProgressBar */
                 QProgressBar {
-                    border: 1px solid #5c5c5c;
-                    background-color: #3c3c3c;
-                    border-radius: 4px;
-                    text-align: center;
-                    font-size: 12px;
+                    /* border: none; */
+                    /* background-color: #4A4A4A; */
+                    /* border-radius: 3px; */
+                    /* text-align: center; */
+                    /* height: 6px; */
                 }
+                
                 QProgressBar::chunk {
-                    background-color: #0078D7;
-                    border-radius: 3px;
+                    /* background-color: #0A84FF; */
+                    /* border-radius: 3px; */
                 }
+                
+                /* Input Fields */
+                QLineEdit, QComboBox, QSpinBox {
+                    /* padding: 6px 8px; */
+                    /* border: 1px solid #4A4A4A; */
+                    /* border-radius: 4px; */
+                    /* background-color: #3A3A3A; */
+                    /* color: #FFFFFF; */
+                    /* font-size: 13px; */
+                    /* selection-background-color: #0A84FF; */
+                    /* selection-color: #FFFFFF; */
+                }
+                
+                QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+                    /* border: 1px solid #0A84FF; */
+                    /* outline: none; */
+                }
+                
+                QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
+                    /* background-color: #2A2A2A; */
+                    /* color: #666666; */
+                }
+                
+                /* Checkbox */
                 QCheckBox {
-                    spacing: 5px;
-                    font-size: 14px;
+                    /* spacing: 10px; */
+                    /* font-size: 13px; */
+                    /* color: #FFFFFF; */
                 }
-                QLabel#status {
-                    background-color: #3c3c3c;
-                    border: 1px solid #5c5c5c;
-                    border-radius: 4px;
-                    padding: 5px;
-                    font-size: 13px;
-                }
+                
                 QCheckBox::indicator {
-                    width: 18px;
-                    height: 18px;
+                    /* width: 18px; */
+                    /* height: 18px; */
                 }
+                
                 QCheckBox::indicator:unchecked {
-                    border: 1px solid #5c5c5c;
-                    background-color: #3c3c3c;
+                    /* border: 1px solid #CCCCCC; */
+                    /* background-color: #3A3A3A; */
+                    /* border-radius: 4px; */
                 }
+                
+                QCheckBox::indicator:unchecked:hover {
+                    /* border: 1px solid #0A84FF; */
+                }
+                
                 QCheckBox::indicator:checked {
-                    border: 1px solid #0078D7;
-                    background-color: #0078D7;
+                    /* border: 1px solid #0A84FF; */
+                    /* background-color: #0A84FF; */
+                    /* border-radius: 4px; */
                 }
-                QCheckBox::indicator:checked::after {
-                    content: "";
-                    position: absolute;
-                    width: 4px;
-                    height: 8px;
-                    border: 2px solid white;
-                    border-top: none;
-                    border-left: none;
-                    transform: rotate(45deg);
-                    margin-left: 4px;
-                    margin-top: 1px;
-                }
-                QComboBox {
-                    font-size: 14px;
-                    padding: 4px;
-                }
-                QSpinBox {
-                    font-size: 14px;
-                    padding: 4px;
+                
+                QCheckBox::indicator:checked:hover {
+                    /* border: 1px solid #007AFF; */
+                    /* background-color: #007AFF; */
                 }
             """
         else:
             # ธีม light (default)
             self.theme_toggle_btn.setText("🌞")  # Sun emoji
             stylesheet = """
+                /* ใช้ฟอนต์ San Francisco ถ้ามี หรือฟอนต์ sans-serif ทั่วไป */
                 QWidget {
-                    background-color: #ffffff;
-                    color: #000000;
-                    font-family: "Segoe UI", sans-serif;
-                    font-size: 14px;
+                    /* font-family: -apple-system, BlinkMacSystemFont, "San Francisco", "Helvetica Neue", sans-serif; */
+                    /* font-size: 13px; */
+                    /* color: #000000; */
+                    /* background-color: #FFFFFF; */
                 }
+                
+                /* ปุ่มรอง (Secondary Button) */
                 QPushButton {
-                    background-color: #f0f0f0;
-                    color: #000000;
-                    border: 1px solid #c0c0c0;
-                    border-radius: 4px;
-                    padding: 8px 16px;
-                    font-weight: 500;
-                    font-size: 14px;
+                    /* background-color: #E6E6E6; */ /* สีเทาอ่อนของ macOS */
+                    /* color: #000000; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 8px 16px; */
+                    /* font-size: 13px; */
+                    /* font-weight: 400; */
                 }
+                
                 QPushButton:hover {
-                    background-color: #e0e0e0;
-                    border: 1px solid #a0a0a0;
+                    /* background-color: #D6D6D6; */ /* สีเข้มขึ้นเมื่อ hover */
                 }
+                
                 QPushButton:pressed {
-                    background-color: #d0d0d0;
-                    border: 1px solid #808080;
+                    /* background-color: #C6C6C6; */ /* สีเข้มขึ้นเมื่อกด */
                 }
-                QPushButton#primary {
-                    background-color: #0078D7;
-                    color: #ffffff;
-                    border: 1px solid #0078D7;
+                
+                /* ปุ่มหลัก (Primary Button) */
+                QPushButton#primary, QPushButton#filter_btn, QPushButton#browse_btn, QPushButton#refresh_model_btn {
+                    /* background-color: #007AFF; */ /* สีฟ้าของ macOS */
+                    /* color: white; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 8px 16px; */
+                    /* font-size: 13px; */
+                    /* font-weight: 500; */
                 }
-                QPushButton#primary:hover {
-                    background-color: #0066B4;
-                    border: 1px solid #006B4;
+                
+                QPushButton#primary:hover, QPushButton#filter_btn:hover, QPushButton#browse_btn:hover, QPushButton#refresh_model_btn:hover {
+                    /* background-color: #0062CC; */ /* สีเข้มขึ้นเมื่อ hover */
                 }
-                QPushButton#primary:pressed {
-                    background-color: #005599;
-                    border: 1px solid #005599;
+                
+                QPushButton#primary:pressed, QPushButton#filter_btn:pressed, QPushButton#browse_btn:pressed, QPushButton#refresh_model_btn:pressed {
+                    /* background-color: #004F99; */ /* สีเข้มขึ้นเมื่อกด */
                 }
+                
+                /* ปุ่มควบคุม (Control Buttons) */
+                QPushButton#pause_btn, QPushButton#stop_btn {
+                    /* background-color: #E6E6E6; */
+                    /* color: #000000; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 6px 12px; */
+                    /* font-size: 12px; */
+                    /* font-weight: 400; */
+                }
+                
+                QPushButton#pause_btn:hover, QPushButton#stop_btn:hover {
+                    /* background-color: #D6D6D6; */
+                }
+                
+                QPushButton#pause_btn:pressed, QPushButton#stop_btn:pressed {
+                    /* background-color: #C6C6C6; */
+                }
+                
+                /* ปุ่ม Theme Toggle */
+                QPushButton#theme_toggle_btn {
+                    /* background-color: transparent; */
+                    /* color: #000000; */
+                    /* border: none; */
+                    /* border-radius: 6px; */
+                    /* padding: 6px 12px; */
+                    /* font-size: 16px; */
+                    /* font-weight: 400; */
+                }
+                
+                QPushButton#theme_toggle_btn:hover {
+                    /* background-color: rgba(0, 0, 0.1); */
+                }
+                
+                QPushButton#theme_toggle_btn:pressed {
+                    /* background-color: rgba(0, 0, 0.2); */
+                }
+                
+                /* Label */
                 QLabel {
-                    font-size: 14px;
+                    /* color: #000000; */
+                    /* font-size: 13px; */
                 }
-                QLabel#title {
-                    font-size: 16px;
-                    font-weight: bold;
-                }
+                
                 QLabel#status {
-                    font-size: 13px;
-                    background-color: #f0f0f0;
-                    border: 1px solid #c0c0c0;
-                    border-radius: 4px;
-                    padding: 5px;
+                    /* color: #666666; */
+                    /* font-size: 12px; */
+                    /* background-color: #F2F2F2; */
+                    /* padding: 6px 8px; */
+                    /* border-radius: 4px; */
                 }
+                
+                /* Tab Widget */
                 QTabWidget::pane {
-                    border: 1px solid #c0c0c0;
-                    border-radius: 4px;
+                    /* border: 1px solid #E6E6E6; */
+                    /* border-radius: 6px; */
+                    /* background-color: #FFFFFF; */
                 }
+                
                 QTabBar::tab {
-                    background-color: #f0f0f0;
-                    color: #000000;
-                    padding: 8px 16px;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-                    border: 1px solid #c0c0c0;
-                    font-size: 14px;
-                    margin-right: 2px;
+                    /* background-color: #F2F2F2; */
+                    /* color: #666; */
+                    /* padding: 8px 16px; */
+                    /* border-top-left-radius: 6px; */
+                    /* border-top-right-radius: 6px; */
+                    /* border: 1px solid #E6E6E6; */
+                    /* font-size: 13px; */
+                    /* font-weight: 400; */
+                    /* margin-right: 2px; */
                 }
+                
                 QTabBar::tab:selected {
-                    background-color: #ffffff;
-                    font-weight: bold;
-                    border-bottom: none;
+                    /* background-color: #FFFFFF; */
+                    /* color: #000000; */
+                    /* font-weight: 500; */
+                    /* border-bottom: none; */
                 }
+                
+                QTabBar::tab:hover:!selected {
+                    /* background-color: #E6E6E6; */
+                }
+                
+                /* Scroll Area */
                 QScrollArea {
-                    background-color: #ffffff;
+                    /* border: none; */
+                    /* background-color: #FFFFFF; */
                 }
+                
+                QScrollBar:vertical {
+                    /* border: none; */
+                    /* background: transparent; */
+                    /* width: 8px; */
+                    /* margin: 0px 0px 0px 0px; */
+                }
+                
+                QScrollBar::handle:vertical {
+                    /* background: rgba(0, 0, 0, 0.3); */
+                    /* border-radius: 4px; */
+                    /* min-height: 20px; */
+                }
+                
+                QScrollBar::handle:vertical:hover {
+                    /* background: rgba(0, 0, 0.5); */
+                }
+                
+                QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
+                    /* height: 0px; */
+                }
+                
+                /* ProgressBar */
                 QProgressBar {
-                    border: 1px solid #c0c0c0;
-                    background-color: #f0f0f0;
-                    border-radius: 4px;
-                    text-align: center;
-                    font-size: 12px;
+                    /* border: none; */
+                    /* background-color: #E6E6E6; */
+                    /* border-radius: 3px; */
+                    /* text-align: center; */
+                    /* height: 6px; */
                 }
+                
                 QProgressBar::chunk {
-                    background-color: #0078D7;
-                    border-radius: 3px;
+                    /* background-color: #007AFF; */
+                    /* border-radius: 3px; */
                 }
+                
+                /* Input Fields */
+                QLineEdit, QComboBox, QSpinBox {
+                    /* padding: 6px 8px; */
+                    /* border: 1px solid #CCCCCC; */
+                    /* border-radius: 4px; */
+                    /* background-color: #FFFFFF; */
+                    /* color: #000000; */
+                    /* font-size: 13px; */
+                    /* selection-background-color: #007AFF; */
+                    /* selection-color: #FFFFFF; */
+                }
+                
+                QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+                    /* border: 1px solid #007AFF; */
+                    /* outline: none; */
+                }
+                
+                QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
+                    /* background-color: #F2F2F2; */
+                    /* color: #999999; */
+                }
+                
+                /* Checkbox */
                 QCheckBox {
-                    spacing: 5px;
-                    font-size: 14px;
+                    /* spacing: 10px; */
+                    /* font-size: 13px; */
+                    /* color: #000000; */
                 }
+                
                 QCheckBox::indicator {
-                    width: 18px;
-                    height: 18px;
+                    /* width: 18px; */
+                    /* height: 18px; */
                 }
+                
                 QCheckBox::indicator:unchecked {
-                    border: 1px solid #c0c0c0;
-                    background-color: #ffffff;
+                    /* border: 1px solid #CCCCCC; */
+                    /* background-color: #FFFFFF; */
+                    /* border-radius: 4px; */
                 }
+                
+                QCheckBox::indicator:unchecked:hover {
+                    /* border: 1px solid #007AFF; */
+                }
+                
                 QCheckBox::indicator:checked {
-                    border: 1px solid #0078D7;
-                    background-color: #0078D7;
+                    /* border: 1px solid #007AFF; */
+                    /* background-color: #007AFF; */
+                    /* border-radius: 4px; */
                 }
-                QCheckBox::indicator:checked::after {
-                    content: "";
-                    position: absolute;
-                    width: 4px;
-                    height: 8px;
-                    border: 2px solid white;
-                    border-top: none;
-                    border-left: none;
-                    transform: rotate(45deg);
-                    margin-left: 4px;
-                    margin-top: 1px;
-                }
-                QComboBox {
-                    font-size: 14px;
-                    padding: 4px;
-                }
-                QSpinBox {
-                    font-size: 14px;
-                    padding: 4px;
+                
+                QCheckBox::indicator:checked:hover {
+                    /* border: 1px solid #0062CC; */
+                    /* background-color: #0062CC; */
                 }
             """
         
@@ -724,11 +1027,12 @@ class ImageFilterApp(QWidget):
             self.status_label.setText(f"Selected image: {os.path.basename(image_path)}. {len(self.selected_images)} images selected.")
     def closeEvent(self, event: QCloseEvent):
         """Handle the close event to ensure proper shutdown."""
-        if self.worker is not None:
+        if self.worker is not None and self.worker.is_running():
             # Stop the worker if it's running
+            self.status_label.setText("Stopping worker thread...")
             self.worker.stop()
             # Wait for the worker to finish (with a longer timeout)
-            self.worker.wait(3000)  # Wait up to 3 seconds
+            self.worker.wait(5000)  # Wait up to 5 seconds
             # Set worker to None after stopping
             self.worker = None
         

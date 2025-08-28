@@ -1,55 +1,72 @@
 import base64
 import json
 import requests
-from PIL import Image
+from PIL import Image, PngImagePlugin
 import io
+import os
 import piexif
 from piexif import helper
+from iptcinfo3 import IPTCInfo
 
 def embed_keywords_in_exif(image_path: str, keywords: list[str]) -> bool:
     """
-    Embeds a list of keywords into the EXIF data of a JPEG or PNG image.
-    For JPEG, it uses the XPKeywords tag.
+    Embeds a list of keywords into the IPTC and EXIF data of a JPEG or PNG image,
+    preserving the original file's modification and access times.
+    For JPEG, it uses both IPTC 'keywords' and EXIF 'XPKeywords'.
     For PNG, it creates a tEXt chunk.
     """
     try:
+        # 1. Store original file timestamps
+        stat = os.stat(image_path)
+        original_atime = stat.st_atime
+        original_mtime = stat.st_mtime
+
         # For JPEG files
         if image_path.lower().endswith(('.jpg', '.jpeg')):
+            # ---- IPTC writing ----
+            try:
+                info = IPTCInfo(image_path, force=True)
+                # Encode keywords to bytes, as required by iptcinfo3
+                encoded_keywords = [k.encode('utf-8') for k in keywords]
+                info['keywords'] = encoded_keywords
+                info.save()
+            except Exception as e:
+                print(f"Error writing IPTC data to {image_path}: {e}")
+                # We can choose to continue to write EXIF data or return False
+                # For now, let's print the error and continue
+
+            # ---- EXIF writing (for Windows compatibility) ----
             try:
                 exif_dict = piexif.load(image_path)
-            except piexif.InvalidImageDataError:
-                # If no EXIF data exists, create an empty dictionary
+            except (piexif.InvalidImageDataError, ValueError):
                 exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
 
-            # XPKeywords uses UTF-16LE encoding. Each character is 2 bytes.
-            # The keywords are joined by semicolons.
             keyword_string = ";".join(keywords)
-            # Encode to bytes and add a null terminator
             xp_keywords_bytes = keyword_string.encode('utf-16le') + b'\x00\x00'
-            
-            # Add to the '0th' IFD (Image File Directory)
             exif_dict["0th"][piexif.ImageIFD.XPKeywords] = xp_keywords_bytes
             
             exif_bytes = piexif.dump(exif_dict)
             piexif.insert(exif_bytes, image_path)
 
-        # For PNG files
+        # For PNG files (PNG does not support standard EXIF/IPTC well)
         elif image_path.lower().endswith('.png'):
             img = Image.open(image_path)
+            png_info = PngImagePlugin.PngInfo()
+            if img.info:
+                for key, value in img.info.items():
+                    png_info.add_text(key, value)
             
-            # Create a tEXt chunk for keywords
             keyword_string = ", ".join(keywords)
+            png_info.add_text('Keywords', keyword_string)
             
-            # PIL's PngInfo object can be used to add text chunks
-            png_info = img.info or {}
-            png_info['Keywords'] = keyword_string
-            
-            # Save the image with the new metadata
             img.save(image_path, "PNG", pnginfo=png_info)
             
         else:
-            print(f"Unsupported file format for EXIF embedding: {image_path}")
+            print(f"Unsupported file format for metadata embedding: {image_path}")
             return False
+
+        # 2. Restore original file timestamps
+        os.utime(image_path, (original_atime, original_mtime))
             
         return True
     except Exception as e:

@@ -4,12 +4,13 @@ import threading
 import json
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
-                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider)
+                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog)
 from PyQt6.QtGui import QPixmap, QCloseEvent
 from PyQt6.QtCore import Qt
 from worker import FilterWorker
 import requests
 from clickable_image_label import ClickableImageLabel
+from utilities import embed_keywords_in_exif
 
 class ImageFilterApp(QWidget):
     OLLAMA_API_URL = "http://192.168.50.55:11434"
@@ -56,7 +57,7 @@ class ImageFilterApp(QWidget):
         self.selected_images = []  # List to store selected image paths
 
         # Load settings
-        self.load_settings()
+        # self.load_settings()  # โหลด settings ก่อนที่จะใช้ self.ollama_url_edit
 
         # Set default theme to dark
         self.dark_theme = True
@@ -208,11 +209,49 @@ class ImageFilterApp(QWidget):
         main_layout.addLayout(progress_layout)
         main_layout.addWidget(self.scroll_area)
         
-        # Add thumbnail slider at the bottom right of the window
-        slider_layout = QHBoxLayout()
-        slider_layout.addStretch()  # Add stretch to push slider to the right
-        slider_layout.addWidget(self.thumbnail_slider)
-        main_layout.addLayout(slider_layout)
+        # Layout for bottom controls (buttons and slider)
+        bottom_controls_layout = QHBoxLayout()
+        
+        # Control Buttons
+        self.delete_btn = QPushButton("Delete")
+        self.move_to_folder_btn = QPushButton("Move to folder")
+        self.embed_keywords_btn = QPushButton("Embed Keywords")
+        self.select_all_btn = QPushButton("Select all")
+        self.deselect_all_btn = QPushButton("Deselect all")
+        self.invert_selection_btn = QPushButton("Invert selection")
+        
+        bottom_controls_layout.addWidget(self.delete_btn)
+        bottom_controls_layout.addWidget(self.move_to_folder_btn)
+        bottom_controls_layout.addWidget(self.embed_keywords_btn)
+        bottom_controls_layout.addWidget(self.select_all_btn)
+        bottom_controls_layout.addWidget(self.deselect_all_btn)
+        bottom_controls_layout.addWidget(self.invert_selection_btn)
+        
+        bottom_controls_layout.addStretch() # Pushes slider to the right
+        
+        # Thumbnail Slider
+        bottom_controls_layout.addWidget(self.thumbnail_slider)
+        
+        main_layout.addLayout(bottom_controls_layout)
+        
+        # Connect delete button to delete_selected_images function
+        self.delete_btn.clicked.connect(self.delete_selected_images)
+        
+        # Connect move to folder button to move_selected_images function
+        self.move_to_folder_btn.clicked.connect(self.move_selected_images)
+        self.embed_keywords_btn.clicked.connect(self.embed_keywords_for_selected_images)
+        
+        # Connect select all button to select_all_images function
+        self.select_all_btn.clicked.connect(self.select_all_images)
+        
+        # Connect deselect all button to deselect_all_images function
+        self.deselect_all_btn.clicked.connect(self.deselect_all_images)
+        
+        # Connect invert selection button to invert_selection function
+        self.invert_selection_btn.clicked.connect(self.invert_selection)
+        
+        # Initially hide control buttons
+        self.update_control_buttons_visibility()
         
         
         # Settings tab layout
@@ -254,6 +293,9 @@ class ImageFilterApp(QWidget):
         self.refresh_model_btn.clicked.connect(self.fetch_ollama_models)
         self.save_settings_btn.clicked.connect(self.save_settings)
         self.model_combo.currentTextChanged.connect(self.on_model_changed)
+        
+        # Load settings after all UI elements are initialized
+        self.load_settings()  # โหลด settings หลังจากที่ UI elements ถูก initialized แล้ว
 
     def fetch_ollama_models(self):
         print("Fetch ollama models called")
@@ -894,7 +936,7 @@ class ImageFilterApp(QWidget):
                 
                 QTabBar::tab {
                     /* background-color: #F2F2F2; */
-                    /* color: #666; */
+                    /* color: #666666; */
                     /* padding: 8px 16px; */
                     /* border-top-left-radius: 6px; */
                     /* border-top-right-radius: 6px; */
@@ -935,7 +977,7 @@ class ImageFilterApp(QWidget):
                 }
                 
                 QScrollBar::handle:vertical:hover {
-                    /* background: rgba(0, 0, 0.5); */
+                    /* background: rgba(0, 0, 0, 0.5); */
                 }
                 
                 QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
@@ -1025,6 +1067,229 @@ class ImageFilterApp(QWidget):
             self.selected_images.append(image_path)
             # Update status to show number of selected images
             self.status_label.setText(f"Selected image: {os.path.basename(image_path)}. {len(self.selected_images)} images selected.")
+        
+        # Update control buttons visibility based on selected images count
+        self.update_control_buttons_visibility()
+    
+    def update_control_buttons_visibility(self):
+        # Show/hide control buttons based on selected images count
+        if len(self.selected_images) > 0:
+            self.delete_btn.setVisible(True)
+            self.move_to_folder_btn.setVisible(True)
+            self.embed_keywords_btn.setVisible(True)
+            self.select_all_btn.setVisible(True)
+            self.deselect_all_btn.setVisible(True)
+            self.invert_selection_btn.setVisible(True)
+        else:
+            self.delete_btn.setVisible(False)
+            self.move_to_folder_btn.setVisible(False)
+            self.embed_keywords_btn.setVisible(False)
+            self.select_all_btn.setVisible(False)
+            self.deselect_all_btn.setVisible(False)
+            self.invert_selection_btn.setVisible(False)
+    
+    def delete_selected_images(self):
+        # Delete selected images by moving them to trash
+        if not self.selected_images:
+            return
+        
+        # Import send2trash module
+        try:
+            from send2trash import send2trash
+        except ImportError:
+            QMessageBox.critical(self, "Error", "send2trash module not found. Please install it using 'pip install send2trash'")
+            return
+        
+        # Confirm deletion
+        reply = QMessageBox.question(self, "Confirm Delete",
+                                   f"Are you sure you want to delete {len(self.selected_images)} selected image(s)?\n\n"
+                                   "This action will move the file(s) to the trash/recycle bin and cannot be undone.",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Move each selected image to trash
+            failed_files = []
+            deleted_files = []
+            for image_path in self.selected_images:
+                try:
+                    send2trash(image_path)
+                    # Add to deleted files list
+                    deleted_files.append(image_path)
+                except Exception as e:
+                    failed_files.append((image_path, str(e)))
+            
+            # Remove deleted images from grid layout
+            for i in reversed(range(self.grid_layout.count())):
+                widget = self.grid_layout.itemAt(i).widget()
+                if widget and isinstance(widget, ClickableImageLabel):
+                    if widget.image_path in deleted_files:
+                        widget.setParent(None)
+            
+            # Remove deleted images from selected images list
+            for image_path in deleted_files:
+                self.selected_images.remove(image_path)
+            
+            # Update control buttons visibility
+            self.update_control_buttons_visibility()
+            
+            # Show result message
+            if failed_files:
+                error_msg = "\n".join([f"{path}: {error}" for path, error in failed_files])
+                QMessageBox.warning(self, "Delete Error", f"Failed to delete the following files:\n\n{error_msg}")
+            else:
+                QMessageBox.information(self, "Delete Success", f"Successfully deleted {len(deleted_files)} image(s).")
+    
+    def move_selected_images(self):
+        # Move selected images to a selected folder
+        if not self.selected_images:
+            return
+        
+        # Import required modules
+        import shutil
+        import os
+        
+        # Select destination folder
+        dest_folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        if not dest_folder:
+            return
+        
+        # Confirm move operation
+        reply = QMessageBox.question(self, "Confirm Move",
+                                   f"Are you sure you want to move {len(self.selected_images)} selected image(s) to '{dest_folder}'?",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Move each selected image to destination folder
+            failed_files = []
+            moved_files = []
+            for image_path in self.selected_images:
+                try:
+                    # Get filename from path
+                    filename = os.path.basename(image_path)
+                    # Create destination path
+                    dest_path = os.path.join(dest_folder, filename)
+                    # Move file
+                    shutil.move(image_path, dest_path)
+                    # Add to moved files list
+                    moved_files.append(image_path)
+                except Exception as e:
+                    failed_files.append((image_path, str(e)))
+            
+            # Remove moved images from grid layout
+            for i in reversed(range(self.grid_layout.count())):
+                widget = self.grid_layout.itemAt(i).widget()
+                if widget and isinstance(widget, ClickableImageLabel):
+                    if widget.image_path in moved_files:
+                        widget.setParent(None)
+            
+            # Remove moved images from selected images list
+            for image_path in moved_files:
+                self.selected_images.remove(image_path)
+            
+            # Update control buttons visibility
+            self.update_control_buttons_visibility()
+            
+            # Show result message
+            if failed_files:
+                error_msg = "\n".join([f"{path}: {error}" for path, error in failed_files])
+                QMessageBox.warning(self, "Move Error", f"Failed to move the following files:\n\n{error_msg}")
+            else:
+                QMessageBox.information(self, "Move Success", f"Successfully moved {len(moved_files)} image(s) to '{dest_folder}'.")
+
+    def embed_keywords_for_selected_images(self):
+        if not self.selected_images:
+            return
+
+        text, ok = QInputDialog.getText(self, 'Embed Keywords',
+                                          'Enter keywords (comma-separated):')
+
+        if ok and text:
+            keywords = [k.strip() for k in text.split(',')]
+            if not keywords:
+                return
+
+            failed_files = []
+            success_count = 0
+            for image_path in self.selected_images:
+                if embed_keywords_in_exif(image_path, keywords):
+                    success_count += 1
+                else:
+                    failed_files.append(image_path)
+
+            if failed_files:
+                error_msg = "\n".join(failed_files)
+                QMessageBox.warning(self, "Embedding Error", f"Failed to embed keywords in the following files:\n\n{error_msg}")
+            
+            if success_count > 0:
+                QMessageBox.information(self, "Embedding Success", f"Successfully embedded keywords in {success_count} image(s).")
+
+    def select_all_images(self):
+        # Select all images in the preview window
+        selected_count = 0
+        for i in range(self.grid_layout.count()):
+            widget = self.grid_layout.itemAt(i).widget()
+            if isinstance(widget, ClickableImageLabel) and widget.image_path:
+                # Check if image is not already selected
+                if widget.image_path not in self.selected_images:
+                    # Add to selected images list
+                    self.selected_images.append(widget.image_path)
+                    selected_count += 1
+                
+                # Set widget as selected
+                widget.setSelected(True)
+        
+        # Update status label
+        self.status_label.setText(f"Selected {selected_count} image(s). {len(self.selected_images)} images selected in total.")
+        
+        # Update control buttons visibility
+        self.update_control_buttons_visibility()
+
+    def deselect_all_images(self):
+        # Deselect all images in the preview window
+        deselected_count = 0
+        for i in range(self.grid_layout.count()):
+            widget = self.grid_layout.itemAt(i).widget()
+            if isinstance(widget, ClickableImageLabel) and widget.image_path:
+                # Check if image is currently selected
+                if widget.image_path in self.selected_images:
+                    # Remove from selected images list
+                    self.selected_images.remove(widget.image_path)
+                    deselected_count += 1
+                
+                # Set widget as deselected
+                widget.setSelected(False)
+        
+        # Update status label
+        self.status_label.setText(f"Deselected {deselected_count} image(s). {len(self.selected_images)} images selected in total.")
+        
+        # Update control buttons visibility
+        self.update_control_buttons_visibility()
+
+    def invert_selection(self):
+        # Invert selection of all images in the preview window
+        inverted_count = 0
+        for i in range(self.grid_layout.count()):
+            widget = self.grid_layout.itemAt(i).widget()
+            if isinstance(widget, ClickableImageLabel) and widget.image_path:
+                # Check if image is currently selected
+                if widget.image_path in self.selected_images:
+                    # Remove from selected images list
+                    self.selected_images.remove(widget.image_path)
+                    # Set widget as deselected
+                    widget.setSelected(False)
+                else:
+                    # Add to selected images list
+                    self.selected_images.append(widget.image_path)
+                    # Set widget as selected
+                    widget.setSelected(True)
+                    inverted_count += 1
+        
+        # Update status label
+        self.status_label.setText(f"Inverted selection of {inverted_count} image(s). {len(self.selected_images)} images selected in total.")
+        
+        # Update control buttons visibility
+        self.update_control_buttons_visibility()
+
     def closeEvent(self, event: QCloseEvent):
         """Handle the close event to ensure proper shutdown."""
         if self.worker is not None and self.worker.is_running():

@@ -3,6 +3,58 @@ import json
 import requests
 from PIL import Image
 import io
+import piexif
+from piexif import helper
+
+def embed_keywords_in_exif(image_path: str, keywords: list[str]) -> bool:
+    """
+    Embeds a list of keywords into the EXIF data of a JPEG or PNG image.
+    For JPEG, it uses the XPKeywords tag.
+    For PNG, it creates a tEXt chunk.
+    """
+    try:
+        # For JPEG files
+        if image_path.lower().endswith(('.jpg', '.jpeg')):
+            try:
+                exif_dict = piexif.load(image_path)
+            except piexif.InvalidImageDataError:
+                # If no EXIF data exists, create an empty dictionary
+                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+
+            # XPKeywords uses UTF-16LE encoding. Each character is 2 bytes.
+            # The keywords are joined by semicolons.
+            keyword_string = ";".join(keywords)
+            # Encode to bytes and add a null terminator
+            xp_keywords_bytes = keyword_string.encode('utf-16le') + b'\x00\x00'
+            
+            # Add to the '0th' IFD (Image File Directory)
+            exif_dict["0th"][piexif.ImageIFD.XPKeywords] = xp_keywords_bytes
+            
+            exif_bytes = piexif.dump(exif_dict)
+            piexif.insert(exif_bytes, image_path)
+
+        # For PNG files
+        elif image_path.lower().endswith('.png'):
+            img = Image.open(image_path)
+            
+            # Create a tEXt chunk for keywords
+            keyword_string = ", ".join(keywords)
+            
+            # PIL's PngInfo object can be used to add text chunks
+            png_info = img.info or {}
+            png_info['Keywords'] = keyword_string
+            
+            # Save the image with the new metadata
+            img.save(image_path, "PNG", pnginfo=png_info)
+            
+        else:
+            print(f"Unsupported file format for EXIF embedding: {image_path}")
+            return False
+            
+        return True
+    except Exception as e:
+        print(f"Error embedding keywords in {image_path}: {e}")
+        return False
 
 def resize_and_encode_image(image_path: str, max_size: int = 1024, quality: int = 85) -> str | None:
     """

@@ -4,7 +4,7 @@ import threading
 import json
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
-                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog)
+                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox)
 from PyQt6.QtGui import QPixmap, QCloseEvent
 from PyQt6.QtCore import Qt
 from worker import FilterWorker
@@ -255,33 +255,58 @@ class ImageFilterApp(QWidget):
         
         
         # Settings tab layout
-        settings_layout = QFormLayout(self.settings_tab)
+        # Main layout for settings tab
+        settings_main_layout = QVBoxLayout(self.settings_tab)
+        settings_main_layout.setContentsMargins(20, 20, 20, 20)
+        settings_main_layout.setSpacing(15)
+
+        # Ollama Settings GroupBox
+        ollama_group_box = QGroupBox("Ollama Settings")
+        ollama_layout = QFormLayout(ollama_group_box)
+        ollama_layout.setContentsMargins(10, 15, 10, 10)
+        ollama_layout.setSpacing(10)
+
         self.ollama_url_edit = QLineEdit(self.OLLAMA_API_URL)
+        self.ollama_url_edit.setMinimumWidth(300)  # Make Ollama URL field wider
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
         self.temp_spin = QSpinBox()
         self.temp_spin.setRange(0, 100)
         self.temp_spin.setValue(0)
         self.temp_spin.setSuffix(" / 100")
-        settings_layout.addRow("Ollama URL:", self.ollama_url_edit)
-        settings_layout.addRow("Model:", self.model_combo)
-        settings_layout.addRow("Temperature:", self.temp_spin)
 
-        # Max workers setting
+        ollama_layout.addRow("Ollama URL:", self.ollama_url_edit)
+        ollama_layout.addRow("Model:", self.model_combo)
+        ollama_layout.addRow("Temperature:", self.temp_spin)
+
+        # Worker Settings GroupBox
+        worker_group_box = QGroupBox("Worker Settings")
+        worker_layout = QFormLayout(worker_group_box)
+        worker_layout.setContentsMargins(10, 15, 10, 10)
+        worker_layout.setSpacing(10)
+
         self.max_workers_spin = QSpinBox()
         self.max_workers_spin.setRange(1, 16)
         self.max_workers_spin.setValue(4)
         self.max_workers_spin.setSuffix(" workers")
-        settings_layout.addRow("Max Concurrent Workers:", self.max_workers_spin)
+        worker_layout.addRow("Max Concurrent Workers:", self.max_workers_spin)
+
+        # Buttons layout
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(10)
         
-        # Refresh model button
         self.refresh_model_btn = QPushButton("Refresh Models")
-        settings_layout.addRow("", self.refresh_model_btn)
-        
-        # Save settings button
         self.save_settings_btn = QPushButton("Save Settings")
-        self.save_settings_btn.clicked.connect(self.save_settings)
-        settings_layout.addRow("", self.save_settings_btn)
+        self.save_settings_btn.clicked.connect(self.save_settings) # Connect here as well
+
+        buttons_layout.addStretch() # Push buttons to the right
+        buttons_layout.addWidget(self.refresh_model_btn)
+        buttons_layout.addWidget(self.save_settings_btn)
+
+        settings_main_layout.addWidget(ollama_group_box)
+        settings_main_layout.addWidget(worker_group_box)
+        settings_main_layout.addStretch() # Push content to the top
+        settings_main_layout.addLayout(buttons_layout)
 
         # Main layout
         layout = QVBoxLayout(self)

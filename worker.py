@@ -1,9 +1,14 @@
 import os
 import threading
 import time
+import logging
 from PyQt6.QtCore import QThread, pyqtSignal
-from utilities import resize_and_encode_image, ask_ollama_about_image
+from utilities import resize_and_encode_image, ask_api_about_image, detect_api_type
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ตั้งค่า logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class FilterWorker(QThread):
     progress_update = pyqtSignal(str)
@@ -12,40 +17,47 @@ class FilterWorker(QThread):
     show_processing_preview = pyqtSignal(str)
     progress_info = pyqtSignal(int, int, float)  # current, total, eta_seconds
 
-    def __init__(self, folder_path, user_prompt, ollama_api_url, model_name, include_subfolders, temp, file_type="both", max_workers=4, app_ref=None):
+    def __init__(self, folder_path, user_prompt, api_url, model_name, include_subfolders, temp, file_type="both", max_workers=4, app_ref=None, api_type="unknown"):
         super().__init__()
         self.folder_path = folder_path
         self.user_prompt = user_prompt
-        self.ollama_api_url = ollama_api_url
+        self.api_url = api_url
         self.model_name = model_name
         self.include_subfolders = include_subfolders
         self.temp = temp
         self.file_type = file_type
         self.max_workers = max_workers
+        self.api_type = api_type
         self._pause_event = threading.Event()
         self._pause_event.set()
         self._stop_event = threading.Event()
         self.app_ref = app_ref
+        logger.debug("FilterWorker initialized")
 
     def pause(self):
         self._pause_event.clear()
+        logger.debug("Worker paused")
 
     def resume(self):
         self._pause_event.set()
+        logger.debug("Worker resumed")
 
     def stop(self):
         self._stop_event.set()
         self._pause_event.set()  # In case it's paused
+        logger.debug("Worker stop requested")
 
     def is_running(self):
         """Check if the worker is currently running."""
         return self.isRunning()
 
     def run(self):
+        logger.debug("Worker started")
         matched = []
         if not os.path.isdir(self.folder_path):
             self.progress_update.emit("Error: Selected folder does not exist.")
             self.finished.emit(matched)
+            logger.debug("Worker finished with error: folder does not exist")
             return
 
         if self.file_type == "png":
@@ -67,6 +79,7 @@ class FilterWorker(QThread):
         if total == 0:
             self.progress_update.emit("No images found in the selected folder.")
             self.finished.emit(matched)
+            logger.debug("Worker finished: no images found")
             return
 
         start_time = time.time()
@@ -83,8 +96,8 @@ class FilterWorker(QThread):
                 return path, False # Indicate failure but count as processed
 
             try:
-                found = ask_ollama_about_image(
-                    self.ollama_api_url, self.model_name, img_b64, self.user_prompt, self.temp
+                found = ask_api_about_image(
+                    self.api_url, self.model_name, img_b64, self.user_prompt, self.temp, self.api_type
                 )
                 return path, found
             except Exception as e:
@@ -94,6 +107,7 @@ class FilterWorker(QThread):
         # Create executor and submit all tasks
         executor = ThreadPoolExecutor(max_workers=self.max_workers)
         futures = {executor.submit(process_image, path): path for path in image_files}
+        logger.debug(f"Submitted {len(futures)} tasks to executor")
 
         try:
             for future in as_completed(futures):
@@ -120,8 +134,11 @@ class FilterWorker(QThread):
                     self.progress_update.emit(f"Not found: {filename}")
         finally:
             # Properly shutdown the executor
+            logger.debug("Shutting down executor")
             executor.shutdown(wait=True)
+            logger.debug("Executor shutdown complete")
 
         if self._stop_event.is_set():
             self.progress_update.emit("Stopped by user.")
         self.finished.emit(matched)
+        logger.debug(f"Worker finished. Matched {len(matched)} images")

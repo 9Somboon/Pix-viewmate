@@ -1,6 +1,6 @@
 {
-  "ollama_url": "http://192.168.50.55:11434",
-  "selected_model": "hf.co/bartowski/OpenGVLab_InternVL3_5-14B-GGUF:Q4_K_M",
+  "ollama_url": "http://192.168.50.67:1234",
+  "selected_model": "internvl3_5-8b",
   "temperature": 0,
   "max_workers": 4
 }

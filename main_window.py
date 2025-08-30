@@ -2,6 +2,7 @@ import sys
 import os
 import threading
 import json
+import logging
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
                              QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox)
@@ -11,6 +12,10 @@ from worker import FilterWorker
 import requests
 from clickable_image_label import ClickableImageLabel
 from utilities import embed_keywords_in_exif
+
+# ตั้งค่า logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class ImageFilterApp(QWidget):
     OLLAMA_API_URL = "http://192.168.50.55:11434"
@@ -333,7 +338,21 @@ class ImageFilterApp(QWidget):
             # ตรวจสอบว่า base_url ลงท้ายด้วย /api/generate หรือไม่ ถ้าใช่ให้ตัดออก
             if base_url.endswith("/api/generate"):
                 base_url = base_url[:-len("/api/generate")]
-            url = base_url + "/api/tags"
+            
+            # ตรวจจับประเภทของ API
+            api_type = self.detect_api_type(base_url)
+            print(f"Detected API type: {api_type}")
+            
+            if api_type == "ollama":
+                url = base_url + "/api/tags"
+            elif api_type == "openai":
+                url = base_url + "/v1/models"
+            else:
+                print("Unknown API type")
+                self.model_combo.clear()
+                self.model_combo.addItem("(fetch failed)")
+                return
+            
             try:
                 print(f"Fetching from URL: {url}")
                 resp = requests.get(url, timeout=10)
@@ -341,7 +360,12 @@ class ImageFilterApp(QWidget):
                 resp.raise_for_status()
                 data = resp.json()
                 print(f"Response data: {data}")
-                models = [m['name'] for m in data.get('models', [])]
+                
+                if api_type == "ollama":
+                    models = [m['name'] for m in data.get('models', [])]
+                elif api_type == "openai":
+                    models = [m['id'] for m in data.get('data', [])]
+                
                 print(f"Models: {models}")
                 self.model_combo.clear()
                 self.model_combo.addItems(models)
@@ -362,6 +386,37 @@ class ImageFilterApp(QWidget):
                 self.model_combo.addItem("(fetch failed)")
         threading.Thread(target=fetch, daemon=True).start()
 
+    def detect_api_type(self, base_url):
+        """
+        ตรวจจับประเภทของ API โดยอัตโนมัติ
+        คืนค่า "ollama", "openai" หรือ "unknown"
+        """
+        # ลองเรียก endpoint ของ Ollama API
+        try:
+            url = base_url + "/api/tags"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                # ตรวจสอบโครงสร้างข้อมูลของ Ollama API
+                if 'models' in data:
+                    return "ollama"
+        except:
+            pass
+        
+        # ลองเรียก endpoint ของ API ที่เข้ากันได้กับ OpenAI
+        try:
+            url = base_url + "/v1/models"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                # ตรวจสอบโครงสร้างข้อมูลของ API ที่เข้ากันได้กับ OpenAI
+                if 'data' in data:
+                    return "openai"
+        except:
+            pass
+        
+        return "unknown"
+    
     def on_model_changed(self):
         # อัปเดตชื่อโมเดลในแถบทดแทนสถานะเมื่อมีการเลือกโมเดลใหม่
         self.model_label.setText(f"Model: {self.model_combo.currentText()}")
@@ -393,11 +448,20 @@ class ImageFilterApp(QWidget):
             self.folder_label.setText("No folder selected")
 
     def start_filtering(self):
+        logger.debug("Start filtering requested")
+        # ตรวจสอบว่ามี worker ที่กำลังทำงานอยู่หรือไม่
+        if self.worker is not None and self.worker.isRunning():
+            logger.debug("Worker is already running")
+            QMessageBox.warning(self, "Worker Busy", "A filtering operation is already in progress. Please wait for it to finish or stop it before starting a new one.")
+            return
+            
         prompt = self.prompt_edit.text().strip()
         if not self.folder_path or not os.path.isdir(self.folder_path):
+            logger.debug("No valid folder selected")
             QMessageBox.warning(self, "No Folder", "Please select a valid folder containing images.")
             return
         if not prompt:
+            logger.debug("No prompt entered")
             QMessageBox.warning(self, "No Prompt", "Please enter a prompt.")
             return
         
@@ -415,6 +479,7 @@ class ImageFilterApp(QWidget):
             resp = requests.get(ollama_base_url, timeout=5)
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
+            logger.debug(f"Connection error: {e}")
             QMessageBox.critical(self, "Connection Error", f"Failed to connect to Ollama API at {ollama_base_url}. Please check your network connection and Ollama server status.\n\nError: {str(e)}")
             return
         
@@ -456,6 +521,7 @@ class ImageFilterApp(QWidget):
             file_type = "jpg"
         else:
             # หากไม่ได้เลือกประเภทไฟล์ใดเลย ให้แสดงข้อความแจ้งเตือน
+            logger.debug("No file type selected")
             QMessageBox.warning(self, "No File Type", "Please select at least one file type (PNG or JPG).")
             self.filter_btn.setEnabled(True)
             self.pause_btn.setEnabled(False)
@@ -465,6 +531,7 @@ class ImageFilterApp(QWidget):
         # ดึงชื่อโมเดลที่เลือกจาก ComboBox
         selected_model = self.model_combo.currentText()
         if not selected_model or selected_model == "(fetch failed)":
+            logger.debug("No valid model selected")
             QMessageBox.warning(self, "No Model", "Please select a valid model from the Settings tab.")
             self.filter_btn.setEnabled(True)
             self.pause_btn.setEnabled(False)
@@ -477,9 +544,14 @@ class ImageFilterApp(QWidget):
         # บันทึกการตั้งค่า
         self.save_settings()
         
+        # ตรวจจับประเภทของ API
+        api_type = self.detect_api_type(ollama_base_url)
+        print(f"Detected API type for worker: {api_type}")
+        
         max_workers = self.max_workers_spin.value()
+        logger.debug(f"Creating new FilterWorker with max_workers: {max_workers}")
         self.worker = FilterWorker(
-            self.folder_path, prompt, ollama_api_url, selected_model, include_subfolders, temp, file_type, max_workers
+            self.folder_path, prompt, ollama_api_url, selected_model, include_subfolders, temp, file_type, max_workers, api_type=api_type
         )
         self.worker.progress_update.connect(self.update_status_and_log)
         self.worker.image_matched.connect(self.add_matched_image_to_display)
@@ -487,6 +559,7 @@ class ImageFilterApp(QWidget):
         self.worker.show_processing_preview.connect(self.show_processing_preview)
         self.worker.progress_info.connect(self.update_progress_info)
         self.worker.start()
+        logger.debug("FilterWorker started")
 
     def toggle_pause_resume(self):
         if not self.worker:
@@ -1317,16 +1390,21 @@ class ImageFilterApp(QWidget):
 
     def closeEvent(self, event: QCloseEvent):
         """Handle the close event to ensure proper shutdown."""
+        logger.debug("Close event received")
         if self.worker is not None and self.worker.is_running():
+            logger.debug("Worker is running, stopping it...")
             # Stop the worker if it's running
             self.status_label.setText("Stopping worker thread...")
             self.worker.stop()
             # Wait for the worker to finish (with a longer timeout)
-            self.worker.wait(5000)  # Wait up to 5 seconds
+            logger.debug("Waiting for worker to finish...")
+            self.worker.wait(10000)  # Wait up to 10 seconds
+            logger.debug("Worker finished or timeout reached")
             # Set worker to None after stopping
             self.worker = None
         
         # Accept the close event to allow the application to close
+        logger.debug("Accepting close event")
         event.accept()
     
     def resizeEvent(self, event):

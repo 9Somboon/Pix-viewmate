@@ -7,6 +7,7 @@ import os
 import piexif
 from piexif import helper
 from iptcinfo3 import IPTCInfo
+from urllib.parse import urlparse, urljoin
 
 def embed_keywords_in_exif(image_path: str, keywords: list[str]) -> bool:
     """
@@ -99,24 +100,119 @@ def resize_and_encode_image(image_path: str, max_size: int = 1024, quality: int 
         print(f"Error processing image {image_path}: {e}")
         return None
 
-def ask_ollama_about_image(ollama_api_url: str, model_name: str, image_base64: str, user_prompt_object: str, temp: float) -> bool:
-    payload = {
-        "model": model_name,
-        "prompt": f"Analyze the provided image carefully. Does this image contain a {user_prompt_object}? Please answer with only 'YES' or 'NO'.",
-        "images": [image_base64],
-        "stream": False,
-        "options": {"temperature": temp}
-    }
+def detect_api_type(api_url: str) -> str:
+    """
+    ตรวจจับประเภทของ API โดยอัตโนมัติ
+    คืนค่า "ollama", "openai" หรือ "unknown"
+    """
     try:
-        response = requests.post(
-            ollama_api_url,
-            json=payload,
-            timeout=90
-        )
-        response.raise_for_status()
-        data = response.json()
-        answer = data.get("response", "").strip().upper()
-        return "YES" in answer and "NO" not in answer
-    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-        print(f"Ollama API error: {e}")
+        # แยก endpoint ออกจาก URL
+        parsed_url = urlparse(api_url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        # ลองเรียก endpoint ของ Ollama API
+        try:
+            url = urljoin(base_url, "/api/tags")
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                # ตรวจสอบโครงสร้างข้อมูลของ Ollama API
+                if 'models' in data:
+                    return "ollama"
+        except:
+            pass
+        
+        # ลองเรียก endpoint ของ API ที่เข้ากันได้กับ OpenAI
+        try:
+            url = urljoin(base_url, "/v1/models")
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                # ตรวจสอบโครงสร้างข้อมูลของ API ที่เข้ากันได้กับ OpenAI
+                if 'data' in data:
+                    return "openai"
+        except:
+            pass
+        
+        return "unknown"
+    except Exception as e:
+        print(f"Error detecting API type: {e}")
+        return "unknown"
+
+def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_prompt_object: str, temp: float, api_type: str) -> bool:
+    # ตรวจจับประเภทของ API หากไม่ได้ระบุ
+    if api_type == "unknown":
+        api_type = detect_api_type(api_url)
+    
+    # แยก endpoint ออกจาก URL
+    parsed_url = urlparse(api_url)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    
+    if api_type == "ollama":
+        # ใช้ endpoint ของ Ollama API
+        url = urljoin(base_url, "/api/generate")
+        payload = {
+            "model": model_name,
+            "prompt": f"Analyze the provided image carefully. Does this image contain a {user_prompt_object}? Please answer with only 'YES' or 'NO'.",
+            "images": [image_base64],
+            "stream": False,
+            "options": {"temperature": temp}
+        }
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=90
+            )
+            response.raise_for_status()
+            data = response.json()
+            answer = data.get("response", "").strip().upper()
+            return "YES" in answer and "NO" not in answer
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            print(f"Ollama API error: {e}")
+            return False
+    elif api_type == "openai":
+        # ใช้ endpoint ของ API ที่เข้ากันได้กับ OpenAI
+        url = urljoin(base_url, "/v1/chat/completions")
+        headers = {
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Analyze the provided image carefully. Does this image contain a {user_prompt_object}? Please answer with only 'YES' or 'NO'."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "temperature": temp,
+            "max_tokens": 10
+        }
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=90
+            )
+            response.raise_for_status()
+            data = response.json()
+            answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip().upper()
+            return "YES" in answer and "NO" not in answer
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            print(f"OpenAI API error: {e}")
+            return False
+    else:
+        print(f"Unknown API type: {api_type}")
         return False

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class FilterWorker(QThread):
     progress_update = pyqtSignal(str)
     image_matched = pyqtSignal(str)
-    finished = pyqtSignal(list)
+    processing_finished = pyqtSignal(list)
     show_processing_preview = pyqtSignal(str)
     progress_info = pyqtSignal(int, int, float)  # current, total, eta_seconds
 
@@ -56,7 +56,7 @@ class FilterWorker(QThread):
         matched = []
         if not os.path.isdir(self.folder_path):
             self.progress_update.emit("Error: Selected folder does not exist.")
-            self.finished.emit(matched)
+            self.processing_finished.emit(matched)
             logger.debug("Worker finished with error: folder does not exist")
             return
 
@@ -78,7 +78,7 @@ class FilterWorker(QThread):
         total = len(image_files)
         if total == 0:
             self.progress_update.emit("No images found in the selected folder.")
-            self.finished.emit(matched)
+            self.processing_finished.emit(matched)
             logger.debug("Worker finished: no images found")
             return
 
@@ -140,5 +140,5 @@ class FilterWorker(QThread):
 
         if self._stop_event.is_set():
             self.progress_update.emit("Stopped by user.")
-        self.finished.emit(matched)
+        self.processing_finished.emit(matched)
         logger.debug(f"Worker finished. Matched {len(matched)} images")

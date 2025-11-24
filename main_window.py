@@ -555,7 +555,7 @@ class ImageFilterApp(QWidget):
         )
         self.worker.progress_update.connect(self.update_status_and_log)
         self.worker.image_matched.connect(self.add_matched_image_to_display)
-        self.worker.finished.connect(self.filtering_finished)
+        self.worker.processing_finished.connect(self.filtering_finished)
         self.worker.show_processing_preview.connect(self.show_processing_preview)
         self.worker.progress_info.connect(self.update_progress_info)
         self.worker.start()
@@ -646,7 +646,7 @@ class ImageFilterApp(QWidget):
         self.stop_btn.setEnabled(False)
         if n == 0:
             QMessageBox.information(self, "No Matches", "No images matched the prompt.")
-        self.worker = None
+        # self.worker = None  <-- Removed to prevent crash. Worker will be cleaned up when a new one is created or app closes.
     
     def update_thumbnail_size(self, size):
         # Update the size of all thumbnails in the grid layout

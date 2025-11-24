@@ -1,6 +1,6 @@
 {
   "ollama_url": "http://192.168.1.114:11434",
-  "selected_model": "qwen3-vl:8b-instruct-q8_0",
+  "selected_model": "qwen3-vl:8b-instruct-q4_K_M",
   "temperature": 0,
   "max_workers": 4
 }

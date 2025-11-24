@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import logging
+import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 from utilities import resize_and_encode_image, ask_api_about_image, detect_api_type
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,7 @@ class FilterWorker(QThread):
         self._pause_event.set()
         self._stop_event = threading.Event()
         self.app_ref = app_ref
+        self.session = requests.Session()
         logger.debug("FilterWorker initialized")
 
     def pause(self):
@@ -91,13 +93,13 @@ class FilterWorker(QThread):
                 return None, None
 
             self.show_processing_preview.emit(path)
-            img_b64 = resize_and_encode_image(path, max_size=1024)
+            img_b64 = resize_and_encode_image(path, max_size=640) # Explicitly set to 640 to match utilities default, though default is already 640
             if img_b64 is None:
                 return path, False # Indicate failure but count as processed
 
             try:
                 found = ask_api_about_image(
-                    self.api_url, self.model_name, img_b64, self.user_prompt, self.temp, self.api_type
+                    self.api_url, self.model_name, img_b64, self.user_prompt, self.temp, self.api_type, session=self.session
                 )
                 return path, found
             except Exception as e:
@@ -136,7 +138,8 @@ class FilterWorker(QThread):
             # Properly shutdown the executor
             logger.debug("Shutting down executor")
             executor.shutdown(wait=True)
-            logger.debug("Executor shutdown complete")
+            self.session.close() # Close the session
+            logger.debug("Executor shutdown complete and session closed")
 
         if self._stop_event.is_set():
             self.progress_update.emit("Stopped by user.")

@@ -74,7 +74,7 @@ def embed_keywords_in_exif(image_path: str, keywords: list[str]) -> bool:
         print(f"Error embedding keywords in {image_path}: {e}")
         return False
 
-def resize_and_encode_image(image_path: str, max_size: int = 1024, quality: int = 85) -> str | None:
+def resize_and_encode_image(image_path: str, max_size: int = 640, quality: int = 85) -> str | None:
     """
     Resizes an image to a max size, converts it to base64, and handles quality for JPEGs.
     """
@@ -139,7 +139,7 @@ def detect_api_type(api_url: str) -> str:
         print(f"Error detecting API type: {e}")
         return "unknown"
 
-def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_prompt_object: str, temp: float, api_type: str) -> bool:
+def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_prompt_object: str, temp: float, api_type: str, session: requests.Session = None) -> bool:
     # ตรวจจับประเภทของ API หากไม่ได้ระบุ
     if api_type == "unknown":
         api_type = detect_api_type(api_url)
@@ -148,6 +148,9 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
     parsed_url = urlparse(api_url)
     base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
     
+    # Use the provided session or the default requests module
+    requester = session if session else requests
+
     if api_type == "ollama":
         # ใช้ endpoint ของ Ollama API
         url = urljoin(base_url, "/api/generate")
@@ -159,7 +162,7 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
             "options": {"temperature": temp}
         }
         try:
-            response = requests.post(
+            response = requester.post(
                 url,
                 json=payload,
                 timeout=90
@@ -200,7 +203,7 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
             "max_tokens": 10
         }
         try:
-            response = requests.post(
+            response = requester.post(
                 url,
                 headers=headers,
                 json=payload,

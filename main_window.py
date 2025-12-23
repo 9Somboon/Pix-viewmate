@@ -12,6 +12,8 @@ from worker import FilterWorker
 import requests
 from clickable_image_label import ClickableImageLabel
 from utilities import embed_keywords_in_exif
+from smart_search_worker import IndexWorker, SearchWorker
+from config import OLLAMA_HOST
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -67,11 +69,18 @@ class ImageFilterApp(QWidget):
         # Set default theme to dark
         self.dark_theme = True
 
+        # Smart Search workers
+        self.index_worker = None
+        self.search_worker = None
+        self.smart_search_folder = ""
+
         # Tabs
         self.tabs = QTabWidget()
         self.main_tab = QWidget()
+        self.smart_search_tab = QWidget()
         self.settings_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Main")
+        self.tabs.addTab(self.smart_search_tab, "Smart Search")
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Main tab layout
@@ -259,6 +268,94 @@ class ImageFilterApp(QWidget):
         self.update_control_buttons_visibility()
         
         
+        # Smart Search tab layout
+        smart_search_layout = QVBoxLayout(self.smart_search_tab)
+        smart_search_layout.setContentsMargins(20, 20, 20, 20)
+        smart_search_layout.setSpacing(15)
+        
+        # Folder selection for indexing
+        ss_folder_layout = QHBoxLayout()
+        ss_folder_layout.setSpacing(10)
+        self.ss_browse_btn = QPushButton("Browse Folder")
+        self.ss_browse_btn.clicked.connect(self.ss_browse_folder)
+        self.ss_folder_label = QLabel("No folder selected")
+        self.ss_folder_label.setWordWrap(True)
+        self.ss_folder_label.setMinimumWidth(200)
+        self.ss_include_subfolder_checkbox = QCheckBox("Include Subfolders")
+        self.ss_include_subfolder_checkbox.setChecked(True)
+        ss_folder_layout.addWidget(self.ss_browse_btn)
+        ss_folder_layout.addWidget(self.ss_folder_label)
+        ss_folder_layout.addWidget(self.ss_include_subfolder_checkbox)
+        ss_folder_layout.addStretch()
+        
+        # Index button and controls
+        ss_index_layout = QHBoxLayout()
+        ss_index_layout.setSpacing(10)
+        self.ss_index_btn = QPushButton("🔄 Sync/Index Images")
+        self.ss_index_btn.clicked.connect(self.ss_start_indexing)
+        self.ss_stop_index_btn = QPushButton("Stop")
+        self.ss_stop_index_btn.setEnabled(False)
+        self.ss_stop_index_btn.clicked.connect(self.ss_stop_indexing)
+        ss_index_layout.addWidget(self.ss_index_btn)
+        ss_index_layout.addWidget(self.ss_stop_index_btn)
+        ss_index_layout.addStretch()
+        
+        # Index progress
+        ss_progress_layout = QHBoxLayout()
+        self.ss_progress_bar = QProgressBar()
+        self.ss_progress_bar.setVisible(False)
+        self.ss_progress_info = QLabel("")
+        self.ss_progress_info.setWordWrap(True)
+        ss_progress_layout.addWidget(self.ss_progress_bar)
+        ss_progress_layout.addSpacing(10)
+        ss_progress_layout.addWidget(self.ss_progress_info)
+        
+        # Status label
+        self.ss_status_label = QLabel("Ready. Select a folder and click 'Sync/Index Images' to start.")
+        self.ss_status_label.setWordWrap(True)
+        self.ss_status_label.setObjectName("status")
+        
+        # Search input
+        ss_search_layout = QHBoxLayout()
+        ss_search_layout.setSpacing(10)
+        self.ss_search_edit = QLineEdit()
+        self.ss_search_edit.setPlaceholderText("Describe what you're looking for (e.g., 'sunset on beach', 'cat playing')")
+        self.ss_search_edit.returnPressed.connect(self.ss_start_search)
+        self.ss_search_btn = QPushButton("🔍 Search")
+        self.ss_search_btn.clicked.connect(self.ss_start_search)
+        ss_search_layout.addWidget(QLabel("Search:"))
+        ss_search_layout.addWidget(self.ss_search_edit)
+        ss_search_layout.addWidget(self.ss_search_btn)
+        
+        # Results scroll area
+        self.ss_scroll_area = QScrollArea()
+        self.ss_scroll_area.setWidgetResizable(True)
+        self.ss_thumbs_widget = QWidget()
+        self.ss_grid_layout = QGridLayout()
+        self.ss_thumbs_widget.setLayout(self.ss_grid_layout)
+        self.ss_scroll_area.setWidget(self.ss_thumbs_widget)
+        
+        # Thumbnail slider for results
+        ss_bottom_layout = QHBoxLayout()
+        ss_bottom_layout.addStretch()
+        ss_bottom_layout.addWidget(QLabel("Thumbnail Size:"))
+        self.ss_thumbnail_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ss_thumbnail_slider.setMinimum(64)
+        self.ss_thumbnail_slider.setMaximum(512)
+        self.ss_thumbnail_slider.setValue(200)
+        self.ss_thumbnail_slider.setFixedWidth(150)
+        self.ss_thumbnail_slider.valueChanged.connect(self.ss_update_thumbnail_size)
+        ss_bottom_layout.addWidget(self.ss_thumbnail_slider)
+        
+        # Assemble Smart Search tab
+        smart_search_layout.addLayout(ss_folder_layout)
+        smart_search_layout.addLayout(ss_index_layout)
+        smart_search_layout.addLayout(ss_progress_layout)
+        smart_search_layout.addWidget(self.ss_status_label)
+        smart_search_layout.addLayout(ss_search_layout)
+        smart_search_layout.addWidget(self.ss_scroll_area)
+        smart_search_layout.addLayout(ss_bottom_layout)
+
         # Settings tab layout
         # Main layout for settings tab
         settings_main_layout = QVBoxLayout(self.settings_tab)
@@ -1403,6 +1500,13 @@ class ImageFilterApp(QWidget):
             # Set worker to None after stopping
             self.worker = None
         
+        # Stop Smart Search workers if running
+        if self.index_worker is not None and self.index_worker.is_running():
+            self.index_worker.stop()
+            self.index_worker.wait(5000)
+        if self.search_worker is not None and self.search_worker.isRunning():
+            self.search_worker.wait(5000)
+        
         # Accept the close event to allow the application to close
         logger.debug("Accepting close event")
         event.accept()
@@ -1411,3 +1515,216 @@ class ImageFilterApp(QWidget):
         # Update the grid layout when the window is resized
         self.update_grid_layout()
         super().resizeEvent(event)
+    
+    # ========== Smart Search Methods ==========
+    
+    def ss_browse_folder(self):
+        """Browse for folder to index."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder for Indexing")
+        if folder:
+            self.smart_search_folder = folder
+            self.ss_folder_label.setText(folder)
+        else:
+            self.ss_folder_label.setText("No folder selected")
+    
+    def ss_start_indexing(self):
+        """Start the image indexing process."""
+        if not self.smart_search_folder or not os.path.isdir(self.smart_search_folder):
+            QMessageBox.warning(self, "No Folder", "Please select a valid folder containing images.")
+            return
+        
+        # Check if worker is already running
+        if self.index_worker is not None and self.index_worker.is_running():
+            QMessageBox.warning(self, "Indexing in Progress", "Please wait for the current indexing to finish.")
+            return
+        
+        # Get Ollama host from settings
+        ollama_host = self.ollama_url_edit.text().rstrip("/")
+        if ollama_host.endswith("/api/generate"):
+            ollama_host = ollama_host[:-len("/api/generate")]
+        if ollama_host.endswith("/api/tags"):
+            ollama_host = ollama_host[:-len("/api/tags")]
+        
+        include_subfolders = self.ss_include_subfolder_checkbox.isChecked()
+        
+        # Clear previous results
+        for i in reversed(range(self.ss_grid_layout.count())):
+            widget = self.ss_grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        
+        # Update UI state
+        self.ss_index_btn.setEnabled(False)
+        self.ss_stop_index_btn.setEnabled(True)
+        self.ss_progress_bar.setVisible(True)
+        self.ss_progress_bar.setValue(0)
+        
+        # Create and start worker
+        self.index_worker = IndexWorker(self.smart_search_folder, include_subfolders, ollama_host)
+        self.index_worker.progress_update.connect(self.ss_on_progress_update)
+        self.index_worker.progress_info.connect(self.ss_on_progress_info)
+        self.index_worker.indexing_finished.connect(self.ss_on_indexing_finished)
+        self.index_worker.error_occurred.connect(self.ss_on_error)
+        self.index_worker.start()
+        
+        logger.debug("IndexWorker started")
+    
+    def ss_stop_indexing(self):
+        """Stop the indexing process."""
+        if self.index_worker is not None and self.index_worker.is_running():
+            self.index_worker.stop()
+            self.ss_status_label.setText("Stopping indexing...")
+            self.ss_stop_index_btn.setEnabled(False)
+    
+    def ss_on_progress_update(self, message: str):
+        """Handle progress update from worker."""
+        self.ss_status_label.setText(message)
+    
+    def ss_on_progress_info(self, current: int, total: int, skipped: int, eta_seconds: float):
+        """Handle progress info from worker."""
+        self.ss_progress_bar.setMaximum(total)
+        self.ss_progress_bar.setValue(current)
+        
+        if eta_seconds > 0:
+            if eta_seconds < 60:
+                eta_str = f"{eta_seconds:.0f}s"
+            elif eta_seconds < 3600:
+                eta_str = f"{eta_seconds/60:.1f}m"
+            else:
+                eta_str = f"{eta_seconds/3600:.1f}h"
+            self.ss_progress_info.setText(f"{current}/{total} (Skipped: {skipped}) - ETA: {eta_str}")
+        else:
+            self.ss_progress_info.setText(f"{current}/{total} (Skipped: {skipped})")
+    
+    def ss_on_indexing_finished(self, indexed_count: int, skipped_count: int):
+        """Handle indexing completion."""
+        self.ss_index_btn.setEnabled(True)
+        self.ss_stop_index_btn.setEnabled(False)
+        self.ss_progress_bar.setVisible(False)
+        self.ss_status_label.setText(f"Indexing complete. Indexed: {indexed_count}, Skipped: {skipped_count}")
+        self.ss_progress_info.setText("")
+        
+        if indexed_count == 0 and skipped_count == 0:
+            QMessageBox.information(self, "No Images", "No images were found in the selected folder.")
+        else:
+            QMessageBox.information(self, "Indexing Complete", 
+                                    f"Successfully indexed {indexed_count} new image(s).\nSkipped {skipped_count} already indexed image(s).")
+    
+    def ss_on_error(self, error_message: str):
+        """Handle error from worker."""
+        self.ss_status_label.setText(f"Error: {error_message}")
+        QMessageBox.critical(self, "Error", error_message)
+    
+    def ss_start_search(self):
+        """Start the search process."""
+        query = self.ss_search_edit.text().strip()
+        if not query:
+            QMessageBox.warning(self, "No Query", "Please enter a search query.")
+            return
+        
+        # Check if search worker is already running
+        if self.search_worker is not None and self.search_worker.isRunning():
+            QMessageBox.warning(self, "Search in Progress", "Please wait for the current search to finish.")
+            return
+        
+        # Get Ollama host from settings
+        ollama_host = self.ollama_url_edit.text().rstrip("/")
+        if ollama_host.endswith("/api/generate"):
+            ollama_host = ollama_host[:-len("/api/generate")]
+        if ollama_host.endswith("/api/tags"):
+            ollama_host = ollama_host[:-len("/api/tags")]
+        
+        # Clear previous results
+        for i in reversed(range(self.ss_grid_layout.count())):
+            widget = self.ss_grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        
+        # Update UI
+        self.ss_search_btn.setEnabled(False)
+        self.ss_status_label.setText("Searching...")
+        
+        # Create and start search worker
+        self.search_worker = SearchWorker(query, limit=50, ollama_host=ollama_host)
+        self.search_worker.status_update.connect(self.ss_on_search_status)
+        self.search_worker.search_complete.connect(self.ss_on_search_complete)
+        self.search_worker.search_error.connect(self.ss_on_search_error)
+        self.search_worker.start()
+        
+        logger.debug(f"SearchWorker started with query: {query}")
+    
+    def ss_on_search_status(self, message: str):
+        """Handle search status update."""
+        self.ss_status_label.setText(message)
+    
+    def ss_on_search_complete(self, results: list):
+        """Handle search completion and display results."""
+        self.ss_search_btn.setEnabled(True)
+        
+        if not results:
+            self.ss_status_label.setText("No matching images found.")
+            return
+        
+        self.ss_status_label.setText(f"Found {len(results)} matching image(s).")
+        
+        # Display results in grid
+        thumbnail_size = self.ss_thumbnail_slider.value()
+        scroll_width = self.ss_scroll_area.viewport().width()
+        padding = 10
+        columns = max(1, scroll_width // (thumbnail_size + padding))
+        
+        for i, result in enumerate(results):
+            filepath = result.get('filepath', '')
+            if not filepath or not os.path.exists(filepath):
+                continue
+            
+            label = ClickableImageLabel(filepath)
+            pixmap = QPixmap(filepath)
+            if not pixmap.isNull():
+                pixmap = pixmap.scaled(thumbnail_size, thumbnail_size, 
+                                       Qt.AspectRatioMode.KeepAspectRatio, 
+                                       Qt.TransformationMode.SmoothTransformation)
+                label.setPixmap(pixmap)
+                label.setFixedSize(thumbnail_size, thumbnail_size)
+                # Add tooltip with description
+                description = result.get('description', '')
+                if description:
+                    label.setToolTip(f"{os.path.basename(filepath)}\n\n{description[:200]}...")
+            else:
+                label.setText("Failed to load")
+            
+            row, col = divmod(i, columns)
+            self.ss_grid_layout.addWidget(label, row, col)
+    
+    def ss_on_search_error(self, error_message: str):
+        """Handle search error."""
+        self.ss_search_btn.setEnabled(True)
+        self.ss_status_label.setText(f"Search error: {error_message}")
+        QMessageBox.critical(self, "Search Error", error_message)
+    
+    def ss_update_thumbnail_size(self, size: int):
+        """Update thumbnail sizes in search results."""
+        for i in range(self.ss_grid_layout.count()):
+            widget = self.ss_grid_layout.itemAt(i).widget()
+            if isinstance(widget, ClickableImageLabel):
+                widget.updatePixmapWithSize(size)
+        
+        # Re-layout the grid
+        scroll_width = self.ss_scroll_area.viewport().width()
+        padding = 10
+        columns = max(1, scroll_width // (size + padding))
+        
+        widgets = []
+        for i in range(self.ss_grid_layout.count()):
+            widget = self.ss_grid_layout.itemAt(i).widget()
+            if widget:
+                widgets.append(widget)
+        
+        for i in reversed(range(self.ss_grid_layout.count())):
+            widget = self.ss_grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        
+        for i, widget in enumerate(widgets):
+            row, col = divmod(i, columns)
+            self.ss_grid_layout.addWidget(widget, row, col)

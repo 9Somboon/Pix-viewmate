@@ -176,13 +176,16 @@ def add_image(filepath: str, description: str, vector: list) -> bool:
         return False
 
 
-def search(query_vector: list, limit: int = 20) -> list:
+def search(query_vector: list, limit: int = 20, distance_threshold: float = 1.0) -> list:
     """
     Search for similar images using vector similarity.
     
     Args:
         query_vector: The query embedding vector
         limit: Maximum number of results to return
+        distance_threshold: Maximum distance to consider as a match (lower = more similar).
+                           Results with _distance > threshold will be filtered out.
+                           Typical values: 0.5 (strict), 1.0 (moderate), 1.5 (loose)
         
     Returns:
         List of dictionaries with 'filepath', 'description', and '_distance' fields
@@ -190,7 +193,14 @@ def search(query_vector: list, limit: int = 20) -> list:
     table = get_table()
     try:
         results = table.search(query_vector).limit(limit).to_list()
-        return results
+        
+        # Filter results by distance threshold
+        # Lower distance = more similar
+        filtered_results = [r for r in results if r.get('_distance', float('inf')) <= distance_threshold]
+        
+        logger.info(f"Search returned {len(results)} results, {len(filtered_results)} within threshold {distance_threshold}")
+        
+        return filtered_results
     except Exception as e:
         print(f"Error searching database: {e}")
         return []

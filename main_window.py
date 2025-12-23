@@ -327,6 +327,21 @@ class ImageFilterApp(QWidget):
         ss_search_layout.addWidget(self.ss_search_edit)
         ss_search_layout.addWidget(self.ss_search_btn)
         
+        # Strictness slider for filtering results
+        ss_strictness_layout = QHBoxLayout()
+        ss_strictness_layout.setSpacing(10)
+        ss_strictness_layout.addWidget(QLabel("Strictness:"))
+        self.ss_strictness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ss_strictness_slider.setMinimum(1)  # Maps to threshold 1.5 (loose)
+        self.ss_strictness_slider.setMaximum(10)  # Maps to threshold 0.3 (strict)
+        self.ss_strictness_slider.setValue(5)  # Default: 0.9 (moderate)
+        self.ss_strictness_slider.setFixedWidth(150)
+        self.ss_strictness_label = QLabel("Moderate")
+        self.ss_strictness_slider.valueChanged.connect(self.ss_update_strictness_label)
+        ss_strictness_layout.addWidget(self.ss_strictness_slider)
+        ss_strictness_layout.addWidget(self.ss_strictness_label)
+        ss_strictness_layout.addStretch()
+        
         # Results scroll area
         self.ss_scroll_area = QScrollArea()
         self.ss_scroll_area.setWidgetResizable(True)
@@ -353,6 +368,7 @@ class ImageFilterApp(QWidget):
         smart_search_layout.addLayout(ss_progress_layout)
         smart_search_layout.addWidget(self.ss_status_label)
         smart_search_layout.addLayout(ss_search_layout)
+        smart_search_layout.addLayout(ss_strictness_layout)
         smart_search_layout.addWidget(self.ss_scroll_area)
         smart_search_layout.addLayout(ss_bottom_layout)
 
@@ -1634,6 +1650,12 @@ class ImageFilterApp(QWidget):
         if ollama_host.endswith("/api/tags"):
             ollama_host = ollama_host[:-len("/api/tags")]
         
+        # Calculate distance threshold from strictness slider
+        # Slider: 1 (loose) to 10 (strict)
+        # Threshold: 1.5 (loose) to 0.3 (strict)
+        strictness = self.ss_strictness_slider.value()
+        distance_threshold = 1.5 - (strictness - 1) * (1.5 - 0.3) / 9
+        
         # Clear previous results
         for i in reversed(range(self.ss_grid_layout.count())):
             widget = self.ss_grid_layout.itemAt(i).widget()
@@ -1642,16 +1664,17 @@ class ImageFilterApp(QWidget):
         
         # Update UI
         self.ss_search_btn.setEnabled(False)
-        self.ss_status_label.setText("Searching...")
+        self.ss_status_label.setText(f"Searching (threshold: {distance_threshold:.2f})...")
         
-        # Create and start search worker
-        self.search_worker = SearchWorker(query, limit=50, ollama_host=ollama_host)
+        # Create and start search worker with distance threshold
+        self.search_worker = SearchWorker(query, limit=50, ollama_host=ollama_host, 
+                                          distance_threshold=distance_threshold)
         self.search_worker.status_update.connect(self.ss_on_search_status)
         self.search_worker.search_complete.connect(self.ss_on_search_complete)
         self.search_worker.search_error.connect(self.ss_on_search_error)
         self.search_worker.start()
         
-        logger.debug(f"SearchWorker started with query: {query}")
+        logger.debug(f"SearchWorker started with query: {query}, threshold: {distance_threshold}")
     
     def ss_on_search_status(self, message: str):
         """Handle search status update."""
@@ -1728,3 +1751,20 @@ class ImageFilterApp(QWidget):
         for i, widget in enumerate(widgets):
             row, col = divmod(i, columns)
             self.ss_grid_layout.addWidget(widget, row, col)
+    
+    def ss_update_strictness_label(self, value: int):
+        """Update the strictness label based on slider value."""
+        if value <= 2:
+            label = "Very Loose"
+        elif value <= 4:
+            label = "Loose"
+        elif value <= 6:
+            label = "Moderate"
+        elif value <= 8:
+            label = "Strict"
+        else:
+            label = "Very Strict"
+        
+        # Calculate and show threshold value
+        threshold = 1.5 - (value - 1) * (1.5 - 0.3) / 9
+        self.ss_strictness_label.setText(f"{label} ({threshold:.2f})")

@@ -317,12 +317,14 @@ class SearchWorker(QThread):
     search_error = pyqtSignal(str)  # Error message
     status_update = pyqtSignal(str)  # Status message
 
-    def __init__(self, query: str, limit: int = 20, ollama_host: str = OLLAMA_HOST):
+    def __init__(self, query: str, limit: int = 20, ollama_host: str = OLLAMA_HOST, 
+                 distance_threshold: float = 1.0):
         super().__init__()
         self.query = query
         self.limit = limit
         self.ollama_host = ollama_host
-        logger.debug(f"SearchWorker initialized with query: {query}")
+        self.distance_threshold = distance_threshold
+        logger.debug(f"SearchWorker initialized with query: {query}, threshold: {distance_threshold}")
 
     def run(self):
         logger.debug("SearchWorker started")
@@ -341,8 +343,8 @@ class SearchWorker(QThread):
         
         self.status_update.emit("Searching database...")
         
-        # Search in LanceDB
-        results = lancedb_manager.search(query_vector, self.limit)
+        # Search in LanceDB with distance threshold
+        results = lancedb_manager.search(query_vector, self.limit, self.distance_threshold)
         
         # Filter out results where the file no longer exists
         valid_results = []
@@ -350,6 +352,10 @@ class SearchWorker(QThread):
             if os.path.exists(result.get('filepath', '')):
                 valid_results.append(result)
         
-        self.status_update.emit(f"Found {len(valid_results)} matching images.")
+        if len(valid_results) == 0:
+            self.status_update.emit("No matching images found. Try lowering the strictness.")
+        else:
+            self.status_update.emit(f"Found {len(valid_results)} matching image(s).")
+        
         self.search_complete.emit(valid_results)
         logger.debug(f"SearchWorker finished with {len(valid_results)} results")

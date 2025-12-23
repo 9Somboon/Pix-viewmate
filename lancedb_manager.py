@@ -130,10 +130,37 @@ def get_table(dimension: int = None):
     return _table
 
 
+def get_all_indexed_filepaths() -> set:
+    """
+    Get all indexed filepaths from the database in a single query.
+    Returns a set for O(1) lookup performance.
+    
+    Returns:
+        Set of all filepath strings currently indexed in the database
+    """
+    table = get_table()
+    try:
+        # Get all filepaths in a single efficient query
+        # Using to_arrow() for better performance with large datasets
+        arrow_table = table.to_arrow()
+        if arrow_table.num_rows == 0:
+            return set()
+        
+        # Extract filepath column and convert to set
+        filepath_column = arrow_table.column("filepath")
+        filepaths = set(filepath_column.to_pylist())
+        logger.info(f"Loaded {len(filepaths)} existing filepaths from database")
+        return filepaths
+    except Exception as e:
+        logger.error(f"Error getting all indexed filepaths: {e}")
+        return set()
+
 
 def is_indexed(filepath: str) -> bool:
     """
     Check if an image is already indexed in the database.
+    
+    NOTE: For bulk checks, use get_all_indexed_filepaths() instead for better performance.
     
     Args:
         filepath: Absolute path to the image file
@@ -183,9 +210,8 @@ def search(query_vector: list, limit: int = 20, distance_threshold: float = 1.0)
     Args:
         query_vector: The query embedding vector
         limit: Maximum number of results to return
-        distance_threshold: Maximum distance to consider as a match (lower = more similar).
-                           Results with _distance > threshold will be filtered out.
-                           Typical values: 0.5 (strict), 1.0 (moderate), 1.5 (loose)
+        distance_threshold: (Deprecated - kept for compatibility) 
+                           Filtering is now done client-side for real-time updates.
         
     Returns:
         List of dictionaries with 'filepath', 'description', and '_distance' fields
@@ -194,13 +220,9 @@ def search(query_vector: list, limit: int = 20, distance_threshold: float = 1.0)
     try:
         results = table.search(query_vector).limit(limit).to_list()
         
-        # Filter results by distance threshold
-        # Lower distance = more similar
-        filtered_results = [r for r in results if r.get('_distance', float('inf')) <= distance_threshold]
+        logger.info(f"Search returned {len(results)} results")
         
-        logger.info(f"Search returned {len(results)} results, {len(filtered_results)} within threshold {distance_threshold}")
-        
-        return filtered_results
+        return results
     except Exception as e:
         print(f"Error searching database: {e}")
         return []

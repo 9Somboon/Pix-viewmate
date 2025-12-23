@@ -5,7 +5,7 @@ import json
 import logging
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
-                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox)
+                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QDoubleSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox)
 from PyQt6.QtGui import QPixmap, QCloseEvent
 from PyQt6.QtCore import Qt
 from worker import FilterWorker
@@ -27,7 +27,9 @@ class ImageFilterApp(QWidget):
             "ollama_url": self.ollama_url_edit.text(),
             "selected_model": self.model_combo.currentText(),
             "temperature": self.temp_spin.value(),
-            "max_workers": self.max_workers_spin.value()
+            "max_workers": self.max_workers_spin.value(),
+            "vision_model": self.vision_model_edit.text(),
+            "embedding_model": self.embedding_model_edit.text()
         }
         
         with open("app_settings.json", "w") as f:
@@ -39,8 +41,13 @@ class ImageFilterApp(QWidget):
                 settings = json.load(f)
             
             self.ollama_url_edit.setText(settings.get("ollama_url", self.OLLAMA_API_URL))
-            self.temp_spin.setValue(settings.get("temperature", 0))
+            self.temp_spin.setValue(settings.get("temperature", 0.0))
             self.max_workers_spin.setValue(settings.get("max_workers", 4))
+            
+            # โหลด Smart Search settings
+            from config import VISION_MODEL, EMBEDDING_MODEL
+            self.vision_model_edit.setText(settings.get("vision_model", VISION_MODEL))
+            self.embedding_model_edit.setText(settings.get("embedding_model", EMBEDDING_MODEL))
             
             # โหลดโมเดลที่เลือกไว้หลังจากดึงรายการโมเดลจาก API
             selected_model = settings.get("selected_model", "")
@@ -73,6 +80,7 @@ class ImageFilterApp(QWidget):
         self.index_worker = None
         self.search_worker = None
         self.smart_search_folder = ""
+        self.cached_search_results = []  # Store all search results for real-time filtering
 
         # Tabs
         self.tabs = QTabWidget()
@@ -338,6 +346,7 @@ class ImageFilterApp(QWidget):
         self.ss_strictness_slider.setFixedWidth(150)
         self.ss_strictness_label = QLabel("Moderate")
         self.ss_strictness_slider.valueChanged.connect(self.ss_update_strictness_label)
+        self.ss_strictness_slider.valueChanged.connect(self.ss_filter_cached_results)  # Real-time filtering
         ss_strictness_layout.addWidget(self.ss_strictness_slider)
         ss_strictness_layout.addWidget(self.ss_strictness_label)
         ss_strictness_layout.addStretch()
@@ -388,10 +397,11 @@ class ImageFilterApp(QWidget):
         self.ollama_url_edit.setMinimumWidth(300)  # Make Ollama URL field wider
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
-        self.temp_spin = QSpinBox()
-        self.temp_spin.setRange(0, 100)
-        self.temp_spin.setValue(0)
-        self.temp_spin.setSuffix(" / 100")
+        self.temp_spin = QDoubleSpinBox()
+        self.temp_spin.setRange(0.0, 1.0)
+        self.temp_spin.setValue(0.0)
+        self.temp_spin.setSingleStep(0.1)
+        self.temp_spin.setDecimals(1)
 
         ollama_layout.addRow("Ollama URL:", self.ollama_url_edit)
         ollama_layout.addRow("Model:", self.model_combo)
@@ -409,6 +419,21 @@ class ImageFilterApp(QWidget):
         self.max_workers_spin.setSuffix(" workers")
         worker_layout.addRow("Max Concurrent Workers:", self.max_workers_spin)
 
+        # Smart Search Settings GroupBox
+        smart_search_group_box = QGroupBox("Smart Search Settings")
+        smart_search_layout = QFormLayout(smart_search_group_box)
+        smart_search_layout.setContentsMargins(10, 15, 10, 10)
+        smart_search_layout.setSpacing(10)
+
+        from config import VISION_MODEL, EMBEDDING_MODEL
+        self.vision_model_edit = QLineEdit(VISION_MODEL)
+        self.vision_model_edit.setMinimumWidth(300)
+        self.embedding_model_edit = QLineEdit(EMBEDDING_MODEL)
+        self.embedding_model_edit.setMinimumWidth(300)
+
+        smart_search_layout.addRow("Vision Model:", self.vision_model_edit)
+        smart_search_layout.addRow("Embedding Model:", self.embedding_model_edit)
+
         # Buttons layout
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(10)
@@ -423,6 +448,7 @@ class ImageFilterApp(QWidget):
 
         settings_main_layout.addWidget(ollama_group_box)
         settings_main_layout.addWidget(worker_group_box)
+        settings_main_layout.addWidget(smart_search_group_box)
         settings_main_layout.addStretch() # Push content to the top
         settings_main_layout.addLayout(buttons_layout)
 
@@ -597,7 +623,8 @@ class ImageFilterApp(QWidget):
             return
         
         include_subfolders = self.include_subfolder_checkbox.isChecked()
-        temp = 0.0  # ใช้ค่า temperature คงที่
+        temp = self.temp_spin.value()  # ใช้ค่า temperature จาก settings
+
 
         # Clear previous thumbnails
         for i in reversed(range(self.grid_layout.count())):
@@ -1575,8 +1602,13 @@ class ImageFilterApp(QWidget):
         self.ss_progress_bar.setVisible(True)
         self.ss_progress_bar.setValue(0)
         
+        # Get model names from settings
+        vision_model = self.vision_model_edit.text()
+        embedding_model = self.embedding_model_edit.text()
+        
         # Create and start worker
-        self.index_worker = IndexWorker(self.smart_search_folder, include_subfolders, ollama_host)
+        self.index_worker = IndexWorker(self.smart_search_folder, include_subfolders, ollama_host, 
+                                        vision_model, embedding_model)
         self.index_worker.progress_update.connect(self.ss_on_progress_update)
         self.index_worker.progress_info.connect(self.ss_on_progress_info)
         self.index_worker.indexing_finished.connect(self.ss_on_indexing_finished)
@@ -1666,9 +1698,13 @@ class ImageFilterApp(QWidget):
         self.ss_search_btn.setEnabled(False)
         self.ss_status_label.setText(f"Searching (threshold: {distance_threshold:.2f})...")
         
+        # Get embedding model from settings
+        embedding_model = self.embedding_model_edit.text()
+        
         # Create and start search worker with distance threshold
         self.search_worker = SearchWorker(query, limit=50, ollama_host=ollama_host, 
-                                          distance_threshold=distance_threshold)
+                                          distance_threshold=distance_threshold,
+                                          embedding_model=embedding_model)
         self.search_worker.status_update.connect(self.ss_on_search_status)
         self.search_worker.search_complete.connect(self.ss_on_search_complete)
         self.search_worker.search_error.connect(self.ss_on_search_error)
@@ -1684,11 +1720,42 @@ class ImageFilterApp(QWidget):
         """Handle search completion and display results."""
         self.ss_search_btn.setEnabled(True)
         
+        # Cache all results for real-time filtering
+        self.cached_search_results = results
+        
         if not results:
             self.ss_status_label.setText("No matching images found.")
             return
         
-        self.ss_status_label.setText(f"Found {len(results)} matching image(s).")
+        # Display results using current strictness threshold
+        self.ss_filter_cached_results()
+    
+    def ss_filter_cached_results(self):
+        """Filter and display cached search results based on current strictness slider value."""
+        if not self.cached_search_results:
+            return
+        
+        # Calculate distance threshold from strictness slider
+        strictness = self.ss_strictness_slider.value()
+        distance_threshold = 1.5 - (strictness - 1) * (1.5 - 0.3) / 9
+        
+        # Filter results by distance threshold
+        filtered_results = [
+            result for result in self.cached_search_results 
+            if result.get('_distance', 0) <= distance_threshold
+        ]
+        
+        # Clear previous results
+        for i in reversed(range(self.ss_grid_layout.count())):
+            widget = self.ss_grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        
+        if not filtered_results:
+            self.ss_status_label.setText(f"No images match current strictness (threshold: {distance_threshold:.2f}). Try lowering strictness.")
+            return
+        
+        self.ss_status_label.setText(f"Found {len(filtered_results)} matching image(s) (threshold: {distance_threshold:.2f}).")
         
         # Display results in grid
         thumbnail_size = self.ss_thumbnail_slider.value()
@@ -1696,7 +1763,7 @@ class ImageFilterApp(QWidget):
         padding = 10
         columns = max(1, scroll_width // (thumbnail_size + padding))
         
-        for i, result in enumerate(results):
+        for i, result in enumerate(filtered_results):
             filepath = result.get('filepath', '')
             if not filepath or not os.path.exists(filepath):
                 continue
@@ -1709,10 +1776,11 @@ class ImageFilterApp(QWidget):
                                        Qt.TransformationMode.SmoothTransformation)
                 label.setPixmap(pixmap)
                 label.setFixedSize(thumbnail_size, thumbnail_size)
-                # Add tooltip with description
+                # Add tooltip with description and distance
                 description = result.get('description', '')
+                distance = result.get('_distance', 0)
                 if description:
-                    label.setToolTip(f"{os.path.basename(filepath)}\n\n{description[:200]}...")
+                    label.setToolTip(f"{os.path.basename(filepath)}\nDistance: {distance:.3f}\n\n{description[:200]}...")
             else:
                 label.setText("Failed to load")
             

@@ -113,11 +113,14 @@ class IndexWorker(QThread):
     error_occurred = pyqtSignal(str)  # error message
 
     def __init__(self, folder_path: str, include_subfolders: bool = True, 
-                 ollama_host: str = OLLAMA_HOST):
+                 ollama_host: str = OLLAMA_HOST, vision_model: str = VISION_MODEL, 
+                 embedding_model: str = EMBEDDING_MODEL):
         super().__init__()
         self.folder_path = folder_path
         self.include_subfolders = include_subfolders
         self.ollama_host = ollama_host
+        self.vision_model = vision_model
+        self.embedding_model = embedding_model
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Not paused by default
@@ -172,22 +175,20 @@ class IndexWorker(QThread):
             self.indexing_finished.emit(0, 0)
             return
         
-        self.progress_update.emit(f"Found {total} images. Checking for already indexed files...")
+        self.progress_update.emit(f"Found {total} images. Loading existing index...")
         
-        # First pass: Filter out already indexed files (done sequentially for accurate skip count)
-        files_to_process = []
-        for filepath in image_files:
-            if self._stop_event.is_set():
-                break
-            if lancedb_manager.is_indexed(filepath):
-                skipped_count += 1
-            else:
-                files_to_process.append(filepath)
+        # OPTIMIZED: Single query to get all indexed filepaths, then use set difference
+        # This is O(1) lookup instead of O(n) database queries
+        existing_files_set = lancedb_manager.get_all_indexed_filepaths()
         
         if self._stop_event.is_set():
             self.progress_update.emit("Indexing stopped by user.")
-            self.indexing_finished.emit(indexed_count, skipped_count)
+            self.indexing_finished.emit(0, 0)
             return
+        
+        # Filter using set difference - O(1) per lookup
+        files_to_process = [f for f in image_files if f not in existing_files_set]
+        skipped_count = total - len(files_to_process)
         
         total_to_process = len(files_to_process)
         self.progress_update.emit(f"Skipped {skipped_count} already indexed. Processing {total_to_process} new images...")
@@ -228,7 +229,7 @@ class IndexWorker(QThread):
                     return (filepath, False, "Stopped by user")
                 
                 # Step 2: Get description from Vision model
-                description = get_image_description(img_base64, self.ollama_host)
+                description = get_image_description(img_base64, self.ollama_host, self.vision_model)
                 if description is None:
                     return (filepath, False, "Failed to get description from Vision model")
                 
@@ -237,7 +238,7 @@ class IndexWorker(QThread):
                     return (filepath, False, "Stopped by user")
                 
                 # Step 3: Get embedding from Embedding model
-                vector = get_text_embedding(description, self.ollama_host)
+                vector = get_text_embedding(description, self.ollama_host, self.embedding_model)
                 if vector is None:
                     return (filepath, False, "Failed to get embedding")
                 
@@ -318,12 +319,13 @@ class SearchWorker(QThread):
     status_update = pyqtSignal(str)  # Status message
 
     def __init__(self, query: str, limit: int = 20, ollama_host: str = OLLAMA_HOST, 
-                 distance_threshold: float = 1.0):
+                 distance_threshold: float = 1.0, embedding_model: str = EMBEDDING_MODEL):
         super().__init__()
         self.query = query
         self.limit = limit
         self.ollama_host = ollama_host
         self.distance_threshold = distance_threshold
+        self.embedding_model = embedding_model
         logger.debug(f"SearchWorker initialized with query: {query}, threshold: {distance_threshold}")
 
     def run(self):
@@ -336,14 +338,14 @@ class SearchWorker(QThread):
         self.status_update.emit("Converting query to embedding...")
         
         # Get embedding for the query
-        query_vector = get_text_embedding(self.query, self.ollama_host)
+        query_vector = get_text_embedding(self.query, self.ollama_host, self.embedding_model)
         if query_vector is None:
             self.search_error.emit("Failed to process search query. Check Ollama connection.")
             return
         
         self.status_update.emit("Searching database...")
         
-        # Search in LanceDB with distance threshold
+        # Search in LanceDB - get all results (filtering done client-side for real-time updates)
         results = lancedb_manager.search(query_vector, self.limit, self.distance_threshold)
         
         # Filter out results where the file no longer exists
@@ -352,10 +354,8 @@ class SearchWorker(QThread):
             if os.path.exists(result.get('filepath', '')):
                 valid_results.append(result)
         
-        if len(valid_results) == 0:
-            self.status_update.emit("No matching images found. Try lowering the strictness.")
-        else:
-            self.status_update.emit(f"Found {len(valid_results)} matching image(s).")
+        # Return all valid results - filtering by strictness is done client-side
+        self.status_update.emit(f"Retrieved {len(valid_results)} image(s) from database.")
         
         self.search_complete.emit(valid_results)
         logger.debug(f"SearchWorker finished with {len(valid_results)} results")

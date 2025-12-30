@@ -13,6 +13,8 @@ import requests
 from clickable_image_label import ClickableImageLabel
 from utilities import embed_keywords_in_exif
 from smart_search_worker import IndexWorker, SearchWorker
+from auto_tag_worker import AutoTagWorker
+from thumbnail_cache import load_cached_thumbnail, get_thumbnail_cache
 from config import OLLAMA_HOST
 
 # ตั้งค่า logging
@@ -24,7 +26,8 @@ class ImageFilterApp(QWidget):
 
     def save_settings(self):
         settings = {
-            "ollama_url": self.ollama_url_edit.text(),
+            "api_provider": self.api_provider_combo.currentText(),
+            "api_url": self.api_url_edit.text(),
             "selected_model": self.model_combo.currentText(),
             "temperature": self.temp_spin.value(),
             "max_workers": self.max_workers_spin.value(),
@@ -40,7 +43,11 @@ class ImageFilterApp(QWidget):
             with open("app_settings.json", "r") as f:
                 settings = json.load(f)
             
-            self.ollama_url_edit.setText(settings.get("ollama_url", self.OLLAMA_API_URL))
+            # โหลด API provider
+            api_provider = settings.get("api_provider", "Auto Detect")
+            self.api_provider_combo.setCurrentText(api_provider)
+            
+            self.api_url_edit.setText(settings.get("api_url", self.OLLAMA_API_URL))
             self.temp_spin.setValue(settings.get("temperature", 0.0))
             self.max_workers_spin.setValue(settings.get("max_workers", 4))
             
@@ -63,7 +70,7 @@ class ImageFilterApp(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Image Filter with Ollama")
+        self.setWindowTitle("Pix-viewmate - Image Filter")
         self.resize(900, 700)
         self.folder_path = ""
         self.worker = None
@@ -71,7 +78,7 @@ class ImageFilterApp(QWidget):
         self.selected_images = []  # List to store selected image paths
 
         # Load settings
-        # self.load_settings()  # โหลด settings ก่อนที่จะใช้ self.ollama_url_edit
+        # self.load_settings()  # โหลด settings ก่อนที่จะใช้ self.api_url_edit
 
         # Set default theme to dark
         self.dark_theme = True
@@ -81,6 +88,9 @@ class ImageFilterApp(QWidget):
         self.search_worker = None
         self.smart_search_folder = ""
         self.cached_search_results = []  # Store all search results for real-time filtering
+        
+        # Auto-Tag worker
+        self.auto_tag_worker = None
 
         # Tabs
         self.tabs = QTabWidget()
@@ -242,12 +252,31 @@ class ImageFilterApp(QWidget):
         self.deselect_all_btn = QPushButton("Deselect all")
         self.invert_selection_btn = QPushButton("Invert selection")
         
+        # Auto Tag Controls
+        self.auto_tag_btn = QPushButton("🏷️ Auto Tag")
+        self.auto_tag_btn.setToolTip("Generate AI keywords for selected images")
+        self.auto_tag_keywords_spin = QSpinBox()
+        self.auto_tag_keywords_spin.setRange(5, 50)
+        self.auto_tag_keywords_spin.setValue(20)
+        self.auto_tag_keywords_spin.setSuffix(" keywords")
+        self.auto_tag_keywords_spin.setToolTip("Number of keywords to generate")
+        self.auto_tag_append_checkbox = QCheckBox("Append")
+        self.auto_tag_append_checkbox.setChecked(True)
+        self.auto_tag_append_checkbox.setToolTip("Append to existing keywords")
+        self.auto_tag_stop_btn = QPushButton("Stop")
+        self.auto_tag_stop_btn.setEnabled(False)
+        
         bottom_controls_layout.addWidget(self.delete_btn)
         bottom_controls_layout.addWidget(self.move_to_folder_btn)
         bottom_controls_layout.addWidget(self.embed_keywords_btn)
         bottom_controls_layout.addWidget(self.select_all_btn)
         bottom_controls_layout.addWidget(self.deselect_all_btn)
         bottom_controls_layout.addWidget(self.invert_selection_btn)
+        bottom_controls_layout.addSpacing(10)
+        bottom_controls_layout.addWidget(self.auto_tag_btn)
+        bottom_controls_layout.addWidget(self.auto_tag_keywords_spin)
+        bottom_controls_layout.addWidget(self.auto_tag_append_checkbox)
+        bottom_controls_layout.addWidget(self.auto_tag_stop_btn)
         
         bottom_controls_layout.addStretch() # Pushes slider to the right
         
@@ -271,6 +300,10 @@ class ImageFilterApp(QWidget):
         
         # Connect invert selection button to invert_selection function
         self.invert_selection_btn.clicked.connect(self.invert_selection)
+        
+        # Connect Auto Tag buttons
+        self.auto_tag_btn.clicked.connect(self.start_auto_tagging)
+        self.auto_tag_stop_btn.clicked.connect(self.stop_auto_tagging)
         
         # Initially hide control buttons
         self.update_control_buttons_visibility()
@@ -387,14 +420,20 @@ class ImageFilterApp(QWidget):
         settings_main_layout.setContentsMargins(20, 20, 20, 20)
         settings_main_layout.setSpacing(15)
 
-        # Ollama Settings GroupBox
-        ollama_group_box = QGroupBox("Ollama Settings")
-        ollama_layout = QFormLayout(ollama_group_box)
-        ollama_layout.setContentsMargins(10, 15, 10, 10)
-        ollama_layout.setSpacing(10)
+        # API Settings GroupBox (supports both Ollama and LM Studio)
+        api_group_box = QGroupBox("API Settings")
+        api_layout = QFormLayout(api_group_box)
+        api_layout.setContentsMargins(10, 15, 10, 10)
+        api_layout.setSpacing(10)
 
-        self.ollama_url_edit = QLineEdit(self.OLLAMA_API_URL)
-        self.ollama_url_edit.setMinimumWidth(300)  # Make Ollama URL field wider
+        # API Provider dropdown
+        self.api_provider_combo = QComboBox()
+        self.api_provider_combo.addItems(["Auto Detect", "Ollama", "LM Studio"])
+        self.api_provider_combo.currentTextChanged.connect(self.on_api_provider_changed)
+        
+        self.api_url_edit = QLineEdit(self.OLLAMA_API_URL)
+        self.api_url_edit.setMinimumWidth(300)
+        self.api_url_edit.setPlaceholderText("e.g., http://localhost:11434 (Ollama) or http://localhost:1234 (LM Studio)")
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
         self.temp_spin = QDoubleSpinBox()
@@ -403,9 +442,10 @@ class ImageFilterApp(QWidget):
         self.temp_spin.setSingleStep(0.1)
         self.temp_spin.setDecimals(1)
 
-        ollama_layout.addRow("Ollama URL:", self.ollama_url_edit)
-        ollama_layout.addRow("Model:", self.model_combo)
-        ollama_layout.addRow("Temperature:", self.temp_spin)
+        api_layout.addRow("API Provider:", self.api_provider_combo)
+        api_layout.addRow("API URL:", self.api_url_edit)
+        api_layout.addRow("Model:", self.model_combo)
+        api_layout.addRow("Temperature:", self.temp_spin)
 
         # Worker Settings GroupBox
         worker_group_box = QGroupBox("Worker Settings")
@@ -446,7 +486,7 @@ class ImageFilterApp(QWidget):
         buttons_layout.addWidget(self.refresh_model_btn)
         buttons_layout.addWidget(self.save_settings_btn)
 
-        settings_main_layout.addWidget(ollama_group_box)
+        settings_main_layout.addWidget(api_group_box)
         settings_main_layout.addWidget(worker_group_box)
         settings_main_layout.addWidget(smart_search_group_box)
         settings_main_layout.addStretch() # Push content to the top
@@ -458,29 +498,39 @@ class ImageFilterApp(QWidget):
         layout.addWidget(self.tabs)
         self.setLayout(layout)
 
-        self.fetch_ollama_models()
+        # Load settings first, then fetch models with the correct URL
+        self.load_settings()  # โหลด settings ก่อนเพื่อให้ใช้ URL ที่ถูกต้อง
+        self.fetch_ollama_models()  # รีเฟรชรายชื่อโมเดลทุกครั้งที่เปิดแอป
+        
         self.refresh_model_btn.clicked.connect(self.fetch_ollama_models)
         self.save_settings_btn.clicked.connect(self.save_settings)
         self.model_combo.currentTextChanged.connect(self.on_model_changed)
-        
-        # Load settings after all UI elements are initialized
-        self.load_settings()  # โหลด settings หลังจากที่ UI elements ถูก initialized แล้ว
 
-    def fetch_ollama_models(self):
-        print("Fetch ollama models called")
+    def fetch_models(self):
+        """Fetch models from the selected API provider (Ollama or LM Studio)"""
+        print("Fetch models called")
         def fetch():
             print("Fetch function started")
-            base_url = self.ollama_url_edit.text().rstrip("/")
-            # ตรวจสอบว่า base_url ลงท้ายด้วย /api/tags หรือไม่ ถ้าใช่ให้ตัดออก
+            base_url = self.api_url_edit.text().rstrip("/")
+            # ตรวจสอบว่า base_url ลงท้ายด้วย endpoint ต่างๆ หรือไม่ ถ้าใช่ให้ตัดออก
             if base_url.endswith("/api/tags"):
                 base_url = base_url[:-len("/api/tags")]
-            # ตรวจสอบว่า base_url ลงท้ายด้วย /api/generate หรือไม่ ถ้าใช่ให้ตัดออก
             if base_url.endswith("/api/generate"):
                 base_url = base_url[:-len("/api/generate")]
+            if base_url.endswith("/v1/models"):
+                base_url = base_url[:-len("/v1/models")]
+            if base_url.endswith("/v1/chat/completions"):
+                base_url = base_url[:-len("/v1/chat/completions")]
             
-            # ตรวจจับประเภทของ API
-            api_type = self.detect_api_type(base_url)
-            print(f"Detected API type: {api_type}")
+            # ใช้ API provider ที่เลือกหรือ auto detect
+            api_provider = self.api_provider_combo.currentText()
+            if api_provider == "Ollama":
+                api_type = "ollama"
+            elif api_provider == "LM Studio":
+                api_type = "openai"
+            else:  # Auto Detect
+                api_type = self.detect_api_type(base_url)
+            print(f"Using API type: {api_type} (provider: {api_provider})")
             
             if api_type == "ollama":
                 url = base_url + "/api/tags"
@@ -524,6 +574,10 @@ class ImageFilterApp(QWidget):
                 self.model_combo.clear()
                 self.model_combo.addItem("(fetch failed)")
         threading.Thread(target=fetch, daemon=True).start()
+    
+    # Alias for backward compatibility
+    def fetch_ollama_models(self):
+        self.fetch_models()
 
     def detect_api_type(self, base_url):
         """
@@ -559,6 +613,28 @@ class ImageFilterApp(QWidget):
     def on_model_changed(self):
         # อัปเดตชื่อโมเดลในแถบทดแทนสถานะเมื่อมีการเลือกโมเดลใหม่
         self.model_label.setText(f"Model: {self.model_combo.currentText()}")
+
+    def on_api_provider_changed(self, provider):
+        """
+        เมื่อเปลี่ยน API provider ให้อัปเดต URL placeholder และ refresh รายการโมเดล
+        """
+        if provider == "Ollama":
+            self.api_url_edit.setPlaceholderText("e.g., http://localhost:11434")
+            # ถ้า URL ว่างหรือเป็น default ของ LM Studio ให้เปลี่ยนเป็น default ของ Ollama
+            current_url = self.api_url_edit.text().strip()
+            if not current_url or current_url == "http://localhost:1234":
+                self.api_url_edit.setText("http://localhost:11434")
+        elif provider == "LM Studio":
+            self.api_url_edit.setPlaceholderText("e.g., http://localhost:1234")
+            # ถ้า URL ว่างหรือเป็น default ของ Ollama ให้เปลี่ยนเป็น default ของ LM Studio
+            current_url = self.api_url_edit.text().strip()
+            if not current_url or current_url == "http://localhost:11434":
+                self.api_url_edit.setText("http://localhost:1234")
+        else:  # Auto Detect
+            self.api_url_edit.setPlaceholderText("e.g., http://localhost:11434 (Ollama) or http://localhost:1234 (LM Studio)")
+        
+        # Refresh รายการโมเดล
+        self.fetch_models()
 
     def dragEnterEvent(self, event):
         if (event.mimeData().hasUrls()):
@@ -604,22 +680,24 @@ class ImageFilterApp(QWidget):
             QMessageBox.warning(self, "No Prompt", "Please enter a prompt.")
             return
         
-        # ตรวจสอบการเชื่อมต่อกับ Ollama API ก่อนเริ่มการกรอง
-        ollama_base_url = self.ollama_url_edit.text().rstrip("/")
-        # ตรวจสอบว่า ollama_base_url ลงท้ายด้วย /api/generate หรือไม่ ถ้าใช่ให้ตัดออก
-        if ollama_base_url.endswith("/api/generate"):
-            ollama_base_url = ollama_base_url[:-len("/api/generate")]
-        # ตรวจสอบว่า ollama_base_url ลงท้ายด้วย /api/tags หรือไม่ ถ้าใช่ให้ตัดออก
-        if ollama_base_url.endswith("/api/tags"):
-            ollama_base_url = ollama_base_url[:-len("/api/tags")]
-        ollama_api_url = ollama_base_url + "/api/generate"
+        # ตรวจสอบการเชื่อมต่อกับ API ก่อนเริ่มการกรอง
+        api_base_url = self.api_url_edit.text().rstrip("/")
+        # ตรวจสอบว่า api_base_url ลงท้ายด้วย /api/generate หรือไม่ ถ้าใช่ให้ตัดออก
+        if api_base_url.endswith("/api/generate"):
+            api_base_url = api_base_url[:-len("/api/generate")]
+        # ตรวจสอบว่า api_base_url ลงท้ายด้วย /api/tags หรือไม่ ถ้าใช่ให้ตัดออก
+        if api_base_url.endswith("/api/tags"):
+            api_base_url = api_base_url[:-len("/api/tags")]
+        # ตรวจสอบว่า api_base_url ลงท้ายด้วย /v1/models หรือไม่ ถ้าใช่ให้ตัดออก
+        if api_base_url.endswith("/v1/models"):
+            api_base_url = api_base_url[:-len("/v1/models")]
         
         try:
-            resp = requests.get(ollama_base_url, timeout=5)
+            resp = requests.get(api_base_url, timeout=5)
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.debug(f"Connection error: {e}")
-            QMessageBox.critical(self, "Connection Error", f"Failed to connect to Ollama API at {ollama_base_url}. Please check your network connection and Ollama server status.\n\nError: {str(e)}")
+            QMessageBox.critical(self, "Connection Error", f"Failed to connect to API at {api_base_url}. Please check your network connection and server status.\n\nError: {str(e)}")
             return
         
         include_subfolders = self.include_subfolder_checkbox.isChecked()
@@ -638,16 +716,6 @@ class ImageFilterApp(QWidget):
         self.pause_btn.setText("Pause")
         self.status_label.setText("Starting filtering...")
 
-        # ใช้ URL ที่ผู้ใช้ตั้งไว้ใน UI และเพิ่ม /api/generate
-        ollama_base_url = self.ollama_url_edit.text().rstrip("/")
-        # ตรวจสอบว่า ollama_base_url ลงท้ายด้วย /api/generate หรือไม่ ถ้าใช่ให้ตัดออก
-        if ollama_base_url.endswith("/api/generate"):
-            ollama_base_url = ollama_base_url[:-len("/api/generate")]
-        # ตรวจสอบว่า ollama_base_url ลงท้ายด้วย /api/tags หรือไม่ ถ้าใช่ให้ตัดออก
-        if ollama_base_url.endswith("/api/tags"):
-            ollama_base_url = ollama_base_url[:-len("/api/tags")]
-        ollama_api_url = ollama_base_url + "/api/generate"
-        
         # ดึงค่าประเภทไฟล์ที่ผู้ใช้เลือก
         png_checked = self.png_checkbox.isChecked()
         jpg_checked = self.jpg_checkbox.isChecked()
@@ -684,14 +752,26 @@ class ImageFilterApp(QWidget):
         # บันทึกการตั้งค่า
         self.save_settings()
         
-        # ตรวจจับประเภทของ API
-        api_type = self.detect_api_type(ollama_base_url)
-        print(f"Detected API type for worker: {api_type}")
+        # ตรวจจับประเภทของ API ตาม provider ที่เลือก
+        api_provider = self.api_provider_combo.currentText()
+        if api_provider == "Ollama":
+            api_type = "ollama"
+        elif api_provider == "LM Studio":
+            api_type = "openai"  # LM Studio uses OpenAI compatible API
+        else:  # Auto Detect
+            api_type = self.detect_api_type(api_base_url)
+        print(f"Using API type: {api_type} (provider: {api_provider})")
+        
+        # กำหนด API URL ตามประเภท
+        if api_type == "ollama":
+            api_url = api_base_url + "/api/generate"
+        else:  # openai compatible (LM Studio)
+            api_url = api_base_url + "/v1/chat/completions"
         
         max_workers = self.max_workers_spin.value()
         logger.debug(f"Creating new FilterWorker with max_workers: {max_workers}")
         self.worker = FilterWorker(
-            self.folder_path, prompt, ollama_api_url, selected_model, include_subfolders, temp, file_type, max_workers, api_type=api_type
+            self.folder_path, prompt, api_url, selected_model, include_subfolders, temp, file_type, max_workers, api_type=api_type
         )
         self.worker.progress_update.connect(self.update_status_and_log)
         self.worker.image_matched.connect(self.add_matched_image_to_display)
@@ -733,10 +813,11 @@ class ImageFilterApp(QWidget):
 
     def add_matched_image_to_display(self, image_path: str):
         label = ClickableImageLabel(image_path)
-        pixmap = QPixmap(image_path)
         thumbnail_size = self.thumbnail_slider.value()
+        
+        # Use cached thumbnail loading for better performance
+        pixmap = load_cached_thumbnail(image_path, thumbnail_size)
         if not pixmap.isNull():
-            pixmap = pixmap.scaled(thumbnail_size, thumbnail_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             label.setPixmap(pixmap)
             label.setFixedSize(thumbnail_size, thumbnail_size)
             # Connect the clicked signal
@@ -1318,6 +1399,9 @@ class ImageFilterApp(QWidget):
             self.select_all_btn.setVisible(True)
             self.deselect_all_btn.setVisible(True)
             self.invert_selection_btn.setVisible(True)
+            self.auto_tag_btn.setVisible(True)
+            self.auto_tag_keywords_spin.setVisible(True)
+            self.auto_tag_append_checkbox.setVisible(True)
         else:
             self.delete_btn.setVisible(False)
             self.move_to_folder_btn.setVisible(False)
@@ -1325,6 +1409,10 @@ class ImageFilterApp(QWidget):
             self.select_all_btn.setVisible(False)
             self.deselect_all_btn.setVisible(False)
             self.invert_selection_btn.setVisible(False)
+            self.auto_tag_btn.setVisible(False)
+            self.auto_tag_keywords_spin.setVisible(False)
+            self.auto_tag_append_checkbox.setVisible(False)
+            self.auto_tag_stop_btn.setVisible(False)
     
     def delete_selected_images(self):
         # Delete selected images by moving them to trash
@@ -1528,6 +1616,73 @@ class ImageFilterApp(QWidget):
         # Update control buttons visibility
         self.update_control_buttons_visibility()
 
+    def start_auto_tagging(self):
+        """Start auto-tagging selected images."""
+        if not self.selected_images:
+            QMessageBox.warning(self, "No Selection", "Please select images to auto-tag.")
+            return
+        
+        # Check if auto-tag worker is already running
+        if self.auto_tag_worker is not None and self.auto_tag_worker.is_running():
+            QMessageBox.warning(self, "Worker Busy", "Auto-tagging is already in progress.")
+            return
+        
+        # Get settings from UI
+        num_keywords = self.auto_tag_keywords_spin.value()
+        append_mode = self.auto_tag_append_checkbox.isChecked()
+        ollama_host = self.api_url_edit.text().rstrip("/")
+        vision_model = self.vision_model_edit.text()
+        
+        # Create and start worker
+        self.auto_tag_worker = AutoTagWorker(
+            image_paths=self.selected_images.copy(),
+            num_keywords=num_keywords,
+            append_mode=append_mode,
+            ollama_host=ollama_host,
+            vision_model=vision_model
+        )
+        
+        # Connect signals
+        self.auto_tag_worker.progress_update.connect(self.update_status_and_log)
+        self.auto_tag_worker.progress_info.connect(self.update_progress_info)
+        self.auto_tag_worker.image_tagged.connect(self.on_image_tagged)
+        self.auto_tag_worker.tagging_finished.connect(self.on_tagging_finished)
+        
+        # Update UI state
+        self.auto_tag_btn.setEnabled(False)
+        self.auto_tag_stop_btn.setEnabled(True)
+        self.auto_tag_stop_btn.setVisible(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(len(self.selected_images))
+        
+        self.status_label.setText(f"Starting auto-tagging of {len(self.selected_images)} images...")
+        self.auto_tag_worker.start()
+
+    def stop_auto_tagging(self):
+        """Stop the auto-tagging process."""
+        if self.auto_tag_worker is not None and self.auto_tag_worker.is_running():
+            self.auto_tag_worker.stop()
+            self.status_label.setText("Stopping auto-tagging...")
+            self.auto_tag_stop_btn.setEnabled(False)
+
+    def on_image_tagged(self, filepath: str, keywords: list):
+        """Called when an image is successfully tagged."""
+        logger.debug(f"Image tagged: {filepath} with {len(keywords)} keywords")
+
+    def on_tagging_finished(self, success_count: int, failed_count: int):
+        """Called when auto-tagging is complete."""
+        self.auto_tag_btn.setEnabled(True)
+        self.auto_tag_stop_btn.setEnabled(False)
+        self.auto_tag_stop_btn.setVisible(False)
+        self.progress_bar.setVisible(False)
+        
+        msg = f"Auto-tagging complete. Success: {success_count}, Failed: {failed_count}"
+        self.status_label.setText(msg)
+        
+        if success_count > 0:
+            QMessageBox.information(self, "Auto-Tag Complete", msg)
+
     def closeEvent(self, event: QCloseEvent):
         """Handle the close event to ensure proper shutdown."""
         logger.debug("Close event received")
@@ -1549,6 +1704,19 @@ class ImageFilterApp(QWidget):
             self.index_worker.wait(5000)
         if self.search_worker is not None and self.search_worker.isRunning():
             self.search_worker.wait(5000)
+        
+        # Stop Auto-Tag worker if running
+        if self.auto_tag_worker is not None and self.auto_tag_worker.is_running():
+            self.auto_tag_worker.stop()
+            self.auto_tag_worker.wait(5000)
+        
+        # Cleanup thumbnail cache
+        try:
+            cache = get_thumbnail_cache()
+            cache.cleanup_disk_cache()
+            logger.debug(f"Cache stats: {cache.get_stats()}")
+        except Exception as e:
+            logger.warning(f"Error cleaning up thumbnail cache: {e}")
         
         # Accept the close event to allow the application to close
         logger.debug("Accepting close event")
@@ -1582,7 +1750,7 @@ class ImageFilterApp(QWidget):
             return
         
         # Get Ollama host from settings
-        ollama_host = self.ollama_url_edit.text().rstrip("/")
+        ollama_host = self.api_url_edit.text().rstrip("/")
         if ollama_host.endswith("/api/generate"):
             ollama_host = ollama_host[:-len("/api/generate")]
         if ollama_host.endswith("/api/tags"):
@@ -1676,7 +1844,7 @@ class ImageFilterApp(QWidget):
             return
         
         # Get Ollama host from settings
-        ollama_host = self.ollama_url_edit.text().rstrip("/")
+        ollama_host = self.api_url_edit.text().rstrip("/")
         if ollama_host.endswith("/api/generate"):
             ollama_host = ollama_host[:-len("/api/generate")]
         if ollama_host.endswith("/api/tags"):

@@ -2,6 +2,7 @@ import sys
 from PyQt6.QtWidgets import QLabel, QApplication, QVBoxLayout, QWidget
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
+from thumbnail_cache import load_cached_thumbnail
 
 
 class ClickableImageLabel(QLabel):
@@ -19,11 +20,11 @@ class ClickableImageLabel(QLabel):
         self.update_pixmap()
     
     def updatePixmapWithSize(self, size):
-        # Update the pixmap with a new size
+        # Update the pixmap with a new size using cached thumbnail
         if self.image_path:
-            pixmap = QPixmap(self.image_path)
+            # Use cached thumbnail loading for better performance
+            pixmap = load_cached_thumbnail(self.image_path, size)
             if not pixmap.isNull():
-                pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 self.setPixmap(pixmap)
                 self.setFixedSize(size, size)
         

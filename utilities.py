@@ -9,6 +9,57 @@ from piexif import helper
 from iptcinfo3 import IPTCInfo
 from urllib.parse import urlparse, urljoin
 
+def read_existing_keywords(image_path: str) -> list[str]:
+    """
+    Reads existing keywords from EXIF and IPTC metadata of a JPEG or PNG image.
+    Returns a list of unique keywords found.
+    """
+    keywords = set()
+    
+    try:
+        if image_path.lower().endswith(('.jpg', '.jpeg')):
+            # Read IPTC keywords
+            try:
+                info = IPTCInfo(image_path, force=True)
+                iptc_keywords = info.get('keywords', [])
+                if iptc_keywords:
+                    for kw in iptc_keywords:
+                        if isinstance(kw, bytes):
+                            kw = kw.decode('utf-8', errors='ignore')
+                        keywords.add(kw.strip())
+            except Exception as e:
+                print(f"Error reading IPTC keywords from {image_path}: {e}")
+            
+            # Read EXIF XPKeywords
+            try:
+                exif_dict = piexif.load(image_path)
+                xp_keywords = exif_dict.get("0th", {}).get(piexif.ImageIFD.XPKeywords)
+                if xp_keywords:
+                    if isinstance(xp_keywords, bytes):
+                        # XPKeywords is UTF-16LE encoded
+                        keyword_string = xp_keywords.decode('utf-16le').rstrip('\x00')
+                        for kw in keyword_string.split(';'):
+                            keywords.add(kw.strip())
+            except Exception as e:
+                print(f"Error reading EXIF keywords from {image_path}: {e}")
+                
+        elif image_path.lower().endswith('.png'):
+            # Read PNG tEXt Keywords
+            try:
+                img = Image.open(image_path)
+                png_keywords = img.info.get('Keywords', '')
+                if png_keywords:
+                    for kw in png_keywords.split(','):
+                        keywords.add(kw.strip())
+                img.close()
+            except Exception as e:
+                print(f"Error reading PNG keywords from {image_path}: {e}")
+    except Exception as e:
+        print(f"Error reading keywords from {image_path}: {e}")
+    
+    return list(keywords)
+
+
 def embed_keywords_in_exif(image_path: str, keywords: list[str]) -> bool:
     """
     Embeds a list of keywords into the IPTC and EXIF data of a JPEG or PNG image,
@@ -170,7 +221,19 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
             response.raise_for_status()
             data = response.json()
             answer = data.get("response", "").strip().upper()
-            return "YES" in answer and "NO" not in answer
+            # Debug: แสดงคำตอบจาก API
+            print(f"[DEBUG] API Response: '{answer}'")
+            # ปรับ logic: ตรวจสอบว่าคำตอบขึ้นต้นด้วย YES หรือมี YES เป็นคำแรก
+            # หรือตอบ YES โดยไม่มี NO นำหน้า
+            answer_words = answer.split()
+            if answer_words:
+                first_word = answer_words[0].strip('.,!?')
+                is_yes = first_word == "YES" or (first_word.startswith("YES") and not first_word.startswith("NO"))
+                # ถ้าคำแรกไม่ชัด ให้ตรวจสอบว่ามี YES อยู่และไม่มี NO อยู่
+                if not is_yes:
+                    is_yes = "YES" in answer and "NO" not in answer
+                return is_yes
+            return False
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             print(f"Ollama API error: {e}")
             return False
@@ -212,7 +275,18 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
             response.raise_for_status()
             data = response.json()
             answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip().upper()
-            return "YES" in answer and "NO" not in answer
+            # Debug: แสดงคำตอบจาก API
+            print(f"[DEBUG] OpenAI API Response: '{answer}'")
+            # ปรับ logic: ตรวจสอบว่าคำตอบขึ้นต้นด้วย YES หรือมี YES เป็นคำแรก
+            answer_words = answer.split()
+            if answer_words:
+                first_word = answer_words[0].strip('.,!?')
+                is_yes = first_word == "YES" or (first_word.startswith("YES") and not first_word.startswith("NO"))
+                # ถ้าคำแรกไม่ชัด ให้ตรวจสอบว่ามี YES อยู่และไม่มี NO อยู่
+                if not is_yes:
+                    is_yes = "YES" in answer and "NO" not in answer
+                return is_yes
+            return False
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             print(f"OpenAI API error: {e}")
             return False

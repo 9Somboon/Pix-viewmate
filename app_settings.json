@@ -1,6 +1,9 @@
 {
-  "ollama_url": "http://192.168.1.114:11434",
-  "selected_model": "qwen3-vl:8b-instruct-q4_K_M",
-  "temperature": 20,
-  "max_workers": 4
+  "api_provider": "LM Studio",
+  "api_url": "http://192.168.1.190:1234",
+  "selected_model": "qwen3-vl-8b-instruct",
+  "temperature": 0.0,
+  "max_workers": 4,
+  "vision_model": "hf.co/unsloth/Qwen3-VL-8B-Instruct-GGUF:Q4_K_X",
+  "embedding_model": "hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0"
 }

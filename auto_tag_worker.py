@@ -9,10 +9,11 @@ import base64
 import requests
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse, urljoin
 from PyQt6.QtCore import QThread, pyqtSignal
 from PIL import Image
 from config import OLLAMA_HOST, VISION_MODEL, MAX_IMAGE_SIZE
-from utilities import read_existing_keywords, embed_keywords_in_exif
+from utilities import read_existing_keywords, embed_keywords_in_exif, detect_api_type
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -45,32 +46,76 @@ def resize_and_encode_for_tagging(image_path: str, max_size: int = MAX_IMAGE_SIZ
 
 def generate_tags_from_image(image_base64: str, num_keywords: int = 20, 
                              ollama_host: str = OLLAMA_HOST, 
-                             model: str = VISION_MODEL) -> list[str]:
+                             model: str = VISION_MODEL,
+                             api_type: str = None) -> list[str]:
     """
-    Send image to Ollama Vision model and get keyword tags.
+    Send image to Vision model and get keyword tags.
+    Supports both Ollama and OpenAI compatible APIs (like LM Studio).
     """
-    url = f"{ollama_host.rstrip('/')}/api/generate"
+    # Auto-detect API type if not provided
+    if api_type is None:
+        api_type = detect_api_type(ollama_host)
+        logger.debug(f"Auto-detected API type: {api_type}")
     
     prompt = f"""Analyze this image and generate exactly {num_keywords} relevant English keywords for stock photography.
 Focus on: objects, subjects, colors, mood, style, concepts.
 Return ONLY a comma-separated list of single-word or two-word keywords.
 Example format: nature, forest, green, peaceful, outdoor, landscape"""
     
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "images": [image_base64],
-        "stream": False,
-        "options": {"temperature": 0.3}
-    }
+    # Parse base URL
+    parsed_url = urlparse(ollama_host)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
     
     try:
-        response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-        response_text = data.get("response", "").strip()
+        if api_type == "openai":
+            # Use OpenAI compatible API (LM Studio, etc.)
+            url = urljoin(base_url, "/v1/chat/completions")
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 500
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            response_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            logger.debug(f"OpenAI API response: {response_text[:100]}...")
+            
+        else:
+            # Default to Ollama API
+            url = urljoin(base_url, "/api/generate")
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "images": [image_base64],
+                "stream": False,
+                "options": {"temperature": 0.3}
+            }
+            
+            response = requests.post(url, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            response_text = data.get("response", "").strip()
+            logger.debug(f"Ollama API response: {response_text[:100]}...")
         
         if not response_text:
+            logger.warning("Empty response from API")
             return []
         
         # Parse comma-separated keywords
@@ -84,7 +129,7 @@ Example format: nature, forest, green, peaceful, outdoor, landscape"""
         return keywords[:num_keywords]  # Limit to requested number
         
     except Exception as e:
-        logger.error(f"Error generating tags: {e}")
+        logger.error(f"Error generating tags ({api_type}): {e}")
         return []
 
 
@@ -111,7 +156,9 @@ class AutoTagWorker(QThread):
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Not paused by default
-        logger.debug(f"AutoTagWorker initialized with {len(image_paths)} images")
+        # Auto-detect API type on initialization
+        self.api_type = detect_api_type(ollama_host)
+        logger.debug(f"AutoTagWorker initialized with {len(image_paths)} images, API type: {self.api_type}")
 
     def stop(self):
         """Stop the worker."""
@@ -174,7 +221,8 @@ class AutoTagWorker(QThread):
                 # Step 2: Generate tags from Vision model
                 new_keywords = generate_tags_from_image(
                     img_base64, self.num_keywords, 
-                    self.ollama_host, self.vision_model
+                    self.ollama_host, self.vision_model,
+                    self.api_type
                 )
                 
                 if not new_keywords:

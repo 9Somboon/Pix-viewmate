@@ -43,62 +43,140 @@ def resize_and_encode_image(image_path: str, max_size: int = MAX_IMAGE_SIZE) -> 
         return None
 
 
-def get_image_description(image_base64: str, ollama_host: str = OLLAMA_HOST, model: str = VISION_MODEL) -> str | None:
+def get_image_description(image_base64: str, ollama_host: str = OLLAMA_HOST, 
+                          model: str = VISION_MODEL, api_type: str = "ollama") -> str | None:
     """
-    Send image to Ollama Vision model and get a text description.
+    Send image to Vision model and get a text description.
+    Supports both Ollama and OpenAI-compatible APIs (vLLM, LM Studio).
     """
-    url = f"{ollama_host.rstrip('/')}/api/generate"
+    from urllib.parse import urlparse, urljoin
     
     prompt = "Describe this image in detail in English. Focus on objects, colors, setting, and mood."
     
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "images": [image_base64],
-        "stream": False,
-        "options": {"temperature": 0.3}
-    }
+    # Parse base URL
+    parsed_url = urlparse(ollama_host)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
     
     try:
-        response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-        description = data.get("response", "").strip()
-        return description if description else None
-    except Exception as e:
-        logger.error(f"Error getting image description: {e}")
-        return None
-
-
-def get_text_embedding(text: str, ollama_host: str = OLLAMA_HOST, model: str = EMBEDDING_MODEL) -> list | None:
-    """
-    Send text to Ollama Embedding model and get a vector.
-    """
-    url = f"{ollama_host.rstrip('/')}/api/embed"
-    
-    payload = {
-        "model": model,
-        "input": text
-    }
-    
-    try:
-        response = requests.post(url, json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Ollama returns embeddings in 'embeddings' array (for batch) or 'embedding' (for single)
-        embeddings = data.get("embeddings")
-        if embeddings and len(embeddings) > 0:
-            return embeddings[0]
-        
-        embedding = data.get("embedding")
-        if embedding:
-            return embedding
+        if api_type == "openai":
+            # Use OpenAI-compatible API (vLLM, LM Studio)
+            url = urljoin(base_url, "/v1/chat/completions")
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 500
+            }
             
-        logger.error(f"No embedding in response: {data}")
-        return None
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            description = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            logger.debug(f"OpenAI API vision response: {description[:100]}...")
+            return description if description else None
+            
+        else:
+            # Default to Ollama API
+            url = urljoin(base_url, "/api/generate")
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "images": [image_base64],
+                "stream": False,
+                "options": {"temperature": 0.3}
+            }
+            
+            response = requests.post(url, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            description = data.get("response", "").strip()
+            logger.debug(f"Ollama API vision response: {description[:100]}...")
+            return description if description else None
+            
     except Exception as e:
-        logger.error(f"Error getting text embedding: {e}")
+        logger.error(f"Error getting image description ({api_type}): {e}")
+        return None
+
+
+def get_text_embedding(text: str, ollama_host: str = OLLAMA_HOST, 
+                       model: str = EMBEDDING_MODEL, api_type: str = "ollama") -> list | None:
+    """
+    Send text to Embedding model and get a vector.
+    Supports both Ollama and OpenAI-compatible APIs (vLLM, LM Studio).
+    """
+    from urllib.parse import urlparse, urljoin
+    
+    # Parse base URL
+    parsed_url = urlparse(ollama_host)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    
+    try:
+        if api_type == "openai":
+            # Use OpenAI-compatible API (vLLM, LM Studio)
+            url = urljoin(base_url, "/v1/embeddings")
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "input": text
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            
+            # OpenAI embedding response format
+            embeddings_data = data.get("data", [])
+            if embeddings_data and len(embeddings_data) > 0:
+                embedding = embeddings_data[0].get("embedding")
+                if embedding:
+                    logger.debug(f"OpenAI API embedding: got vector of length {len(embedding)}")
+                    return embedding
+            
+            logger.error(f"No embedding in OpenAI response: {data}")
+            return None
+            
+        else:
+            # Default to Ollama API
+            url = urljoin(base_url, "/api/embed")
+            payload = {
+                "model": model,
+                "input": text
+            }
+            
+            response = requests.post(url, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Ollama returns embeddings in 'embeddings' array (for batch) or 'embedding' (for single)
+            embeddings = data.get("embeddings")
+            if embeddings and len(embeddings) > 0:
+                logger.debug(f"Ollama API embedding: got vector of length {len(embeddings[0])}")
+                return embeddings[0]
+            
+            embedding = data.get("embedding")
+            if embedding:
+                logger.debug(f"Ollama API embedding: got vector of length {len(embedding)}")
+                return embedding
+                
+            logger.error(f"No embedding in Ollama response: {data}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting text embedding ({api_type}): {e}")
         return None
 
 
@@ -114,17 +192,18 @@ class IndexWorker(QThread):
 
     def __init__(self, folder_path: str, include_subfolders: bool = True, 
                  ollama_host: str = OLLAMA_HOST, vision_model: str = VISION_MODEL, 
-                 embedding_model: str = EMBEDDING_MODEL):
+                 embedding_model: str = EMBEDDING_MODEL, api_type: str = "ollama"):
         super().__init__()
         self.folder_path = folder_path
         self.include_subfolders = include_subfolders
         self.ollama_host = ollama_host
         self.vision_model = vision_model
         self.embedding_model = embedding_model
+        self.api_type = api_type
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Not paused by default
-        logger.debug("IndexWorker initialized")
+        logger.debug(f"IndexWorker initialized with api_type: {api_type}")
 
     def stop(self):
         """Stop the worker."""
@@ -229,7 +308,7 @@ class IndexWorker(QThread):
                     return (filepath, False, "Stopped by user")
                 
                 # Step 2: Get description from Vision model
-                description = get_image_description(img_base64, self.ollama_host, self.vision_model)
+                description = get_image_description(img_base64, self.ollama_host, self.vision_model, self.api_type)
                 if description is None:
                     return (filepath, False, "Failed to get description from Vision model")
                 
@@ -238,7 +317,7 @@ class IndexWorker(QThread):
                     return (filepath, False, "Stopped by user")
                 
                 # Step 3: Get embedding from Embedding model
-                vector = get_text_embedding(description, self.ollama_host, self.embedding_model)
+                vector = get_text_embedding(description, self.ollama_host, self.embedding_model, self.api_type)
                 if vector is None:
                     return (filepath, False, "Failed to get embedding")
                 
@@ -319,14 +398,16 @@ class SearchWorker(QThread):
     status_update = pyqtSignal(str)  # Status message
 
     def __init__(self, query: str, limit: int = 20, ollama_host: str = OLLAMA_HOST, 
-                 distance_threshold: float = 1.0, embedding_model: str = EMBEDDING_MODEL):
+                 distance_threshold: float = 1.0, embedding_model: str = EMBEDDING_MODEL,
+                 api_type: str = "ollama"):
         super().__init__()
         self.query = query
         self.limit = limit
         self.ollama_host = ollama_host
         self.distance_threshold = distance_threshold
         self.embedding_model = embedding_model
-        logger.debug(f"SearchWorker initialized with query: {query}, threshold: {distance_threshold}")
+        self.api_type = api_type
+        logger.debug(f"SearchWorker initialized with query: {query}, threshold: {distance_threshold}, api_type: {api_type}")
 
     def run(self):
         logger.debug("SearchWorker started")
@@ -338,9 +419,9 @@ class SearchWorker(QThread):
         self.status_update.emit("Converting query to embedding...")
         
         # Get embedding for the query
-        query_vector = get_text_embedding(self.query, self.ollama_host, self.embedding_model)
+        query_vector = get_text_embedding(self.query, self.ollama_host, self.embedding_model, self.api_type)
         if query_vector is None:
-            self.search_error.emit("Failed to process search query. Check Ollama connection.")
+            self.search_error.emit("Failed to process search query. Check API connection.")
             return
         
         self.status_update.emit("Searching database...")

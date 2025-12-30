@@ -1,7 +1,7 @@
 {
-  "api_provider": "LM Studio",
-  "api_url": "http://192.168.1.190:1234",
-  "selected_model": "qwen3-vl-8b-instruct",
+  "api_provider": "vLLM",
+  "api_url": "http://192.168.1.190:8000",
+  "selected_model": "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit",
   "temperature": 0.0,
   "max_workers": 4,
   "vision_model": "hf.co/unsloth/Qwen3-VL-8B-Instruct-GGUF:Q4_K_X",

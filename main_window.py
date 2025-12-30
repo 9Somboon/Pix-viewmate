@@ -428,7 +428,7 @@ class ImageFilterApp(QWidget):
 
         # API Provider dropdown
         self.api_provider_combo = QComboBox()
-        self.api_provider_combo.addItems(["Auto Detect", "Ollama", "LM Studio"])
+        self.api_provider_combo.addItems(["Auto Detect", "Ollama", "LM Studio", "vLLM"])
         self.api_provider_combo.currentTextChanged.connect(self.on_api_provider_changed)
         
         self.api_url_edit = QLineEdit(self.OLLAMA_API_URL)
@@ -526,8 +526,8 @@ class ImageFilterApp(QWidget):
             api_provider = self.api_provider_combo.currentText()
             if api_provider == "Ollama":
                 api_type = "ollama"
-            elif api_provider == "LM Studio":
-                api_type = "openai"
+            elif api_provider == "LM Studio" or api_provider == "vLLM":
+                api_type = "openai"  # Both LM Studio and vLLM use OpenAI-compatible API
             else:  # Auto Detect
                 api_type = self.detect_api_type(base_url)
             print(f"Using API type: {api_type} (provider: {api_provider})")
@@ -620,18 +620,24 @@ class ImageFilterApp(QWidget):
         """
         if provider == "Ollama":
             self.api_url_edit.setPlaceholderText("e.g., http://localhost:11434")
-            # ถ้า URL ว่างหรือเป็น default ของ LM Studio ให้เปลี่ยนเป็น default ของ Ollama
+            # ถ้า URL ว่างหรือเป็น default ของ provider อื่น ให้เปลี่ยนเป็น default ของ Ollama
             current_url = self.api_url_edit.text().strip()
-            if not current_url or current_url == "http://localhost:1234":
+            if not current_url or current_url in ["http://localhost:1234", "http://localhost:8000"]:
                 self.api_url_edit.setText("http://localhost:11434")
         elif provider == "LM Studio":
             self.api_url_edit.setPlaceholderText("e.g., http://localhost:1234")
-            # ถ้า URL ว่างหรือเป็น default ของ Ollama ให้เปลี่ยนเป็น default ของ LM Studio
+            # ถ้า URL ว่างหรือเป็น default ของ provider อื่น ให้เปลี่ยนเป็น default ของ LM Studio
             current_url = self.api_url_edit.text().strip()
-            if not current_url or current_url == "http://localhost:11434":
+            if not current_url or current_url in ["http://localhost:11434", "http://localhost:8000"]:
                 self.api_url_edit.setText("http://localhost:1234")
+        elif provider == "vLLM":
+            self.api_url_edit.setPlaceholderText("e.g., http://localhost:8000 or http://192.168.x.x:8000")
+            # ถ้า URL ว่างหรือเป็น default ของ provider อื่น ให้เปลี่ยนเป็น default ของ vLLM
+            current_url = self.api_url_edit.text().strip()
+            if not current_url or current_url in ["http://localhost:11434", "http://localhost:1234"]:
+                self.api_url_edit.setText("http://localhost:8000")
         else:  # Auto Detect
-            self.api_url_edit.setPlaceholderText("e.g., http://localhost:11434 (Ollama) or http://localhost:1234 (LM Studio)")
+            self.api_url_edit.setPlaceholderText("e.g., http://localhost:11434 (Ollama) or http://localhost:1234 (LM Studio) or http://localhost:8000 (vLLM)")
         
         # Refresh รายการโมเดล
         self.fetch_models()
@@ -692,13 +698,32 @@ class ImageFilterApp(QWidget):
         if api_base_url.endswith("/v1/models"):
             api_base_url = api_base_url[:-len("/v1/models")]
         
+        # ตรวจสอบการเชื่อมต่อด้วย endpoint ที่ถูกต้อง
+        api_provider = self.api_provider_combo.currentText()
+        if api_provider == "Ollama":
+            check_endpoint = "/api/tags"
+        elif api_provider in ["LM Studio", "vLLM"]:
+            check_endpoint = "/v1/models"
+        else:  # Auto Detect - ลองเช็คทั้งสอง
+            check_endpoint = "/api/tags"  # ลอง Ollama ก่อน
+        
         try:
-            resp = requests.get(api_base_url, timeout=5)
+            resp = requests.get(api_base_url + check_endpoint, timeout=5)
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
-            logger.debug(f"Connection error: {e}")
-            QMessageBox.critical(self, "Connection Error", f"Failed to connect to API at {api_base_url}. Please check your network connection and server status.\n\nError: {str(e)}")
-            return
+            # ถ้าเป็น Auto Detect และ fail ลอง OpenAI endpoint
+            if api_provider == "Auto Detect":
+                try:
+                    resp = requests.get(api_base_url + "/v1/models", timeout=5)
+                    resp.raise_for_status()
+                except requests.exceptions.RequestException:
+                    logger.debug(f"Connection error: {e}")
+                    QMessageBox.critical(self, "Connection Error", f"Failed to connect to API at {api_base_url}. Please check your network connection and server status.\n\nError: {str(e)}")
+                    return
+            else:
+                logger.debug(f"Connection error: {e}")
+                QMessageBox.critical(self, "Connection Error", f"Failed to connect to API at {api_base_url}. Please check your network connection and server status.\n\nError: {str(e)}")
+                return
         
         include_subfolders = self.include_subfolder_checkbox.isChecked()
         temp = self.temp_spin.value()  # ใช้ค่า temperature จาก settings
@@ -756,8 +781,8 @@ class ImageFilterApp(QWidget):
         api_provider = self.api_provider_combo.currentText()
         if api_provider == "Ollama":
             api_type = "ollama"
-        elif api_provider == "LM Studio":
-            api_type = "openai"  # LM Studio uses OpenAI compatible API
+        elif api_provider == "LM Studio" or api_provider == "vLLM":
+            api_type = "openai"  # Both LM Studio and vLLM use OpenAI compatible API
         else:  # Auto Detect
             api_type = self.detect_api_type(api_base_url)
         print(f"Using API type: {api_type} (provider: {api_provider})")
@@ -1774,16 +1799,25 @@ class ImageFilterApp(QWidget):
         vision_model = self.vision_model_edit.text()
         embedding_model = self.embedding_model_edit.text()
         
+        # Determine API type based on provider
+        api_provider = self.api_provider_combo.currentText()
+        if api_provider == "Ollama":
+            api_type = "ollama"
+        elif api_provider == "LM Studio" or api_provider == "vLLM":
+            api_type = "openai"
+        else:  # Auto Detect
+            api_type = self.detect_api_type(ollama_host)
+        
         # Create and start worker
         self.index_worker = IndexWorker(self.smart_search_folder, include_subfolders, ollama_host, 
-                                        vision_model, embedding_model)
+                                        vision_model, embedding_model, api_type)
         self.index_worker.progress_update.connect(self.ss_on_progress_update)
         self.index_worker.progress_info.connect(self.ss_on_progress_info)
         self.index_worker.indexing_finished.connect(self.ss_on_indexing_finished)
         self.index_worker.error_occurred.connect(self.ss_on_error)
         self.index_worker.start()
         
-        logger.debug("IndexWorker started")
+        logger.debug(f"IndexWorker started with api_type: {api_type}")
     
     def ss_stop_indexing(self):
         """Stop the indexing process."""
@@ -1869,16 +1903,25 @@ class ImageFilterApp(QWidget):
         # Get embedding model from settings
         embedding_model = self.embedding_model_edit.text()
         
+        # Determine API type based on provider
+        api_provider = self.api_provider_combo.currentText()
+        if api_provider == "Ollama":
+            api_type = "ollama"
+        elif api_provider == "LM Studio" or api_provider == "vLLM":
+            api_type = "openai"
+        else:  # Auto Detect
+            api_type = self.detect_api_type(ollama_host)
+        
         # Create and start search worker with distance threshold
         self.search_worker = SearchWorker(query, limit=50, ollama_host=ollama_host, 
                                           distance_threshold=distance_threshold,
-                                          embedding_model=embedding_model)
+                                          embedding_model=embedding_model, api_type=api_type)
         self.search_worker.status_update.connect(self.ss_on_search_status)
         self.search_worker.search_complete.connect(self.ss_on_search_complete)
         self.search_worker.search_error.connect(self.ss_on_search_error)
         self.search_worker.start()
         
-        logger.debug(f"SearchWorker started with query: {query}, threshold: {distance_threshold}")
+        logger.debug(f"SearchWorker started with query: {query}, threshold: {distance_threshold}, api_type: {api_type}")
     
     def ss_on_search_status(self, message: str):
         """Handle search status update."""

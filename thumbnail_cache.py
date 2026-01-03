@@ -208,33 +208,50 @@ def get_thumbnail_cache() -> ThumbnailCache:
     return _thumbnail_cache
 
 
-def load_cached_thumbnail(image_path: str, size: int) -> QPixmap:
+def load_cached_thumbnail(image_path: str, size: int, fast_mode: bool = False) -> QPixmap:
     """
     Convenience function to load a thumbnail with caching.
     
     Args:
         image_path: Path to the original image
         size: Desired thumbnail size (square)
+        fast_mode: If True, use fast transformation (for real-time slider dragging)
         
     Returns:
         QPixmap of the thumbnail
     """
     cache = get_thumbnail_cache()
     
-    # Try to get from cache
-    pixmap = cache.get_thumbnail(image_path, size)
-    if pixmap is not None:
-        return pixmap
+    # Try to get from cache (only if not in fast_mode, or use nearest cached size)
+    if not fast_mode:
+        pixmap = cache.get_thumbnail(image_path, size)
+        if pixmap is not None:
+            return pixmap
+    
+    # In fast mode, try to find a nearby cached thumbnail and scale it
+    if fast_mode:
+        # Try common sizes first (64, 128, 256, 512)
+        for cached_size in [256, 128, 512, 64]:
+            cached_pixmap = cache.get_thumbnail(image_path, cached_size)
+            if cached_pixmap is not None:
+                # Scale from cached thumbnail (much faster than loading from disk)
+                return cached_pixmap.scaled(
+                    size, size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation
+                )
     
     # Load and scale from disk
     pixmap = QPixmap(image_path)
     if not pixmap.isNull():
+        transformation = Qt.TransformationMode.FastTransformation if fast_mode else Qt.TransformationMode.SmoothTransformation
         pixmap = pixmap.scaled(
             size, size,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            transformation
         )
-        # Cache it
-        cache.cache_thumbnail(image_path, size, pixmap)
+        # Only cache if not in fast mode (to avoid polluting cache with low-quality thumbnails)
+        if not fast_mode:
+            cache.cache_thumbnail(image_path, size, pixmap)
     
     return pixmap

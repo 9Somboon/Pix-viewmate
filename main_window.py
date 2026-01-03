@@ -7,10 +7,11 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
                              QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QDoubleSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox)
 from PyQt6.QtGui import QPixmap, QCloseEvent
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from worker import FilterWorker
 import requests
 from clickable_image_label import ClickableImageLabel
+from selectable_grid_widget import SelectableGridWidget
 from utilities import embed_keywords_in_exif
 from smart_search_worker import IndexWorker, SearchWorker
 from auto_tag_worker import AutoTagWorker
@@ -32,7 +33,10 @@ class ImageFilterApp(QWidget):
             "temperature": self.temp_spin.value(),
             "max_workers": self.max_workers_spin.value(),
             "vision_model": self.vision_model_edit.text(),
-            "embedding_model": self.embedding_model_edit.text()
+            "embedding_model": self.embedding_model_edit.text(),
+            "use_same_embedding_api": self.use_same_embedding_api_checkbox.isChecked(),
+            "embedding_api_provider": self.embedding_api_provider_combo.currentText(),
+            "embedding_api_url": self.embedding_api_url_edit.text()
         }
         
         with open("app_settings.json", "w") as f:
@@ -56,6 +60,13 @@ class ImageFilterApp(QWidget):
             self.vision_model_edit.setText(settings.get("vision_model", VISION_MODEL))
             self.embedding_model_edit.setText(settings.get("embedding_model", EMBEDDING_MODEL))
             
+            # โหลด Embedding API settings
+            use_same = settings.get("use_same_embedding_api", True)
+            self.use_same_embedding_api_checkbox.setChecked(use_same)
+            self.embedding_api_provider_combo.setCurrentText(settings.get("embedding_api_provider", "Ollama"))
+            self.embedding_api_url_edit.setText(settings.get("embedding_api_url", "http://localhost:11434"))
+            self.toggle_embedding_api_fields()
+            
             # โหลดโมเดลที่เลือกไว้หลังจากดึงรายการโมเดลจาก API
             selected_model = settings.get("selected_model", "")
             if selected_model:
@@ -76,6 +87,7 @@ class ImageFilterApp(QWidget):
         self.worker = None
         self.setAcceptDrops(True)  # Enable drag and drop
         self.selected_images = []  # List to store selected image paths
+        self.last_clicked_index = None  # For shift-click range selection
 
         # Load settings
         # self.load_settings()  # โหลด settings ก่อนที่จะใช้ self.api_url_edit
@@ -91,6 +103,12 @@ class ImageFilterApp(QWidget):
         
         # Auto-Tag worker
         self.auto_tag_worker = None
+        
+        # Thumbnail resize debounce timer
+        self.thumbnail_resize_timer = QTimer()
+        self.thumbnail_resize_timer.setSingleShot(True)
+        self.thumbnail_resize_timer.timeout.connect(self._apply_high_quality_thumbnails)
+        self.pending_thumbnail_size = 256
 
         # Tabs
         self.tabs = QTabWidget()
@@ -229,9 +247,9 @@ class ImageFilterApp(QWidget):
         # Scroll area for thumbnails
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.thumbs_widget = QWidget()
-        self.grid_layout = QGridLayout()
-        self.thumbs_widget.setLayout(self.grid_layout)
+        self.thumbs_widget = SelectableGridWidget()
+        self.grid_layout = self.thumbs_widget.grid_layout  # Reference to the grid layout
+        self.thumbs_widget.selection_changed.connect(self.on_rubber_band_selection)
         self.scroll_area.setWidget(self.thumbs_widget)
 
         # Assemble main tab
@@ -387,9 +405,9 @@ class ImageFilterApp(QWidget):
         # Results scroll area
         self.ss_scroll_area = QScrollArea()
         self.ss_scroll_area.setWidgetResizable(True)
-        self.ss_thumbs_widget = QWidget()
-        self.ss_grid_layout = QGridLayout()
-        self.ss_thumbs_widget.setLayout(self.ss_grid_layout)
+        self.ss_thumbs_widget = SelectableGridWidget()
+        self.ss_grid_layout = self.ss_thumbs_widget.grid_layout  # Reference to the grid layout
+        self.ss_thumbs_widget.selection_changed.connect(self.on_rubber_band_selection)
         self.ss_scroll_area.setWidget(self.ss_thumbs_widget)
         
         # Thumbnail slider for results
@@ -471,8 +489,31 @@ class ImageFilterApp(QWidget):
         self.embedding_model_edit = QLineEdit(EMBEDDING_MODEL)
         self.embedding_model_edit.setMinimumWidth(300)
 
+        # Checkbox to use same API for embedding
+        self.use_same_embedding_api_checkbox = QCheckBox("Use same API URL for Embedding")
+        self.use_same_embedding_api_checkbox.setChecked(True)
+        self.use_same_embedding_api_checkbox.stateChanged.connect(self.toggle_embedding_api_fields)
+
+        # Separate Embedding API settings
+        self.embedding_api_provider_label = QLabel("Embedding API Provider:")
+        self.embedding_api_provider_combo = QComboBox()
+        self.embedding_api_provider_combo.addItems(["Ollama", "LM Studio", "vLLM"])
+        self.embedding_api_url_label = QLabel("Embedding API URL:")
+        self.embedding_api_url_edit = QLineEdit("http://localhost:11434")
+        self.embedding_api_url_edit.setMinimumWidth(300)
+        self.embedding_api_url_edit.setPlaceholderText("e.g., http://localhost:11434 or http://localhost:1234")
+
         smart_search_layout.addRow("Vision Model:", self.vision_model_edit)
         smart_search_layout.addRow("Embedding Model:", self.embedding_model_edit)
+        smart_search_layout.addRow("", self.use_same_embedding_api_checkbox)
+        smart_search_layout.addRow(self.embedding_api_provider_label, self.embedding_api_provider_combo)
+        smart_search_layout.addRow(self.embedding_api_url_label, self.embedding_api_url_edit)
+        
+        # Initially hide embedding API fields
+        self.embedding_api_provider_label.setVisible(False)
+        self.embedding_api_provider_combo.setVisible(False)
+        self.embedding_api_url_label.setVisible(False)
+        self.embedding_api_url_edit.setVisible(False)
 
         # Buttons layout
         buttons_layout = QHBoxLayout()
@@ -641,6 +682,16 @@ class ImageFilterApp(QWidget):
         
         # Refresh รายการโมเดล
         self.fetch_models()
+
+    def toggle_embedding_api_fields(self):
+        """
+        ซ่อน/แสดง Embedding API fields ตามสถานะของ checkbox
+        """
+        use_same = self.use_same_embedding_api_checkbox.isChecked()
+        self.embedding_api_provider_label.setVisible(not use_same)
+        self.embedding_api_provider_combo.setVisible(not use_same)
+        self.embedding_api_url_label.setVisible(not use_same)
+        self.embedding_api_url_edit.setVisible(not use_same)
 
     def dragEnterEvent(self, event):
         if (event.mimeData().hasUrls()):
@@ -895,15 +946,31 @@ class ImageFilterApp(QWidget):
         # self.worker = None  <-- Removed to prevent crash. Worker will be cleaned up when a new one is created or app closes.
     
     def update_thumbnail_size(self, size):
-        # Update the size of all thumbnails in the grid layout
+        # Use debounce pattern: show fast preview immediately, then high quality after delay
+        self.pending_thumbnail_size = size
+        
+        # Update with fast transformation immediately (for responsive feel)
         for i in range(self.grid_layout.count()):
             widget = self.grid_layout.itemAt(i).widget()
             if isinstance(widget, ClickableImageLabel):
-                # Update the pixmap with the new size using the widget's method
-                widget.updatePixmapWithSize(size)
+                # Use fast mode for immediate preview
+                widget.updatePixmapWithSize(size, fast_mode=True)
         
-        # Update the grid layout
+        # Update the grid layout immediately
         self.update_grid_layout()
+        
+        # Restart debounce timer for high quality render
+        self.thumbnail_resize_timer.stop()
+        self.thumbnail_resize_timer.start(150)  # 150ms delay before high quality render
+    
+    def _apply_high_quality_thumbnails(self):
+        """Apply high quality thumbnails after slider stops moving."""
+        size = self.pending_thumbnail_size
+        for i in range(self.grid_layout.count()):
+            widget = self.grid_layout.itemAt(i).widget()
+            if isinstance(widget, ClickableImageLabel):
+                # Use normal mode for high quality
+                widget.updatePixmapWithSize(size, fast_mode=False)
 
     def update_grid_layout(self):
         # Update the grid layout based on the current thumbnail size and scroll area width
@@ -1401,18 +1468,83 @@ class ImageFilterApp(QWidget):
         # ใช้ stylesheet
         self.setStyleSheet(stylesheet)
     
-    def on_image_clicked(self, image_path: str):
-        # Handle image click - add or remove from selected images list
-        if image_path in self.selected_images:
-            self.selected_images.remove(image_path)
-            # Update status to show number of selected images
-            self.status_label.setText(f"Unselected image. {len(self.selected_images)} images selected.")
+    def on_image_clicked(self, image_path: str, modifiers=None):
+        """Handle image click with support for Shift+Click range selection and Ctrl+Click toggle."""
+        # Get all image labels to determine indices
+        all_labels = []
+        for i in range(self.grid_layout.count()):
+            item = self.grid_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, ClickableImageLabel):
+                    all_labels.append(widget)
+        
+        # Find current clicked index
+        current_index = None
+        for idx, label in enumerate(all_labels):
+            if label.image_path == image_path:
+                current_index = idx
+                break
+        
+        if current_index is None:
+            return
+        
+        # Handle Shift+Click for range selection
+        if modifiers and (modifiers & Qt.KeyboardModifier.ShiftModifier):
+            if self.last_clicked_index is not None:
+                # Select range from last clicked to current
+                start_idx = min(self.last_clicked_index, current_index)
+                end_idx = max(self.last_clicked_index, current_index)
+                
+                for idx in range(start_idx, end_idx + 1):
+                    label = all_labels[idx]
+                    if label.image_path not in self.selected_images:
+                        self.selected_images.append(label.image_path)
+                    label.setSelected(True)
+                
+                self.status_label.setText(f"Selected {end_idx - start_idx + 1} images. {len(self.selected_images)} images selected in total.")
+            else:
+                # No previous click, just select this one
+                if image_path not in self.selected_images:
+                    self.selected_images.append(image_path)
+                # Find and update the label
+                for label in all_labels:
+                    if label.image_path == image_path:
+                        label.setSelected(True)
+                        break
+                self.status_label.setText(f"Selected image: {os.path.basename(image_path)}. {len(self.selected_images)} images selected.")
         else:
-            self.selected_images.append(image_path)
-            # Update status to show number of selected images
-            self.status_label.setText(f"Selected image: {os.path.basename(image_path)}. {len(self.selected_images)} images selected.")
+            # Normal click or Ctrl+Click - toggle selection (already handled in ClickableImageLabel)
+            if image_path in self.selected_images:
+                self.selected_images.remove(image_path)
+                self.status_label.setText(f"Unselected image. {len(self.selected_images)} images selected.")
+            else:
+                self.selected_images.append(image_path)
+                self.status_label.setText(f"Selected image: {os.path.basename(image_path)}. {len(self.selected_images)} images selected.")
+        
+        # Update last clicked index for next shift-click
+        self.last_clicked_index = current_index
         
         # Update control buttons visibility based on selected images count
+        self.update_control_buttons_visibility()
+    
+    def on_rubber_band_selection(self):
+        """Handle rubber band (drag) selection - update selected_images list."""
+        # Sync selected_images list with actual widget selection state
+        self.selected_images.clear()
+        
+        for i in range(self.grid_layout.count()):
+            item = self.grid_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, ClickableImageLabel):
+                    if widget.selected:
+                        self.selected_images.append(widget.image_path)
+        
+        # Update status
+        self.status_label.setText(f"Selected {len(self.selected_images)} images via drag selection.")
+        
+        # Update control buttons visibility
         self.update_control_buttons_visibility()
     
     def update_control_buttons_visibility(self):
@@ -1808,16 +1940,29 @@ class ImageFilterApp(QWidget):
         else:  # Auto Detect
             api_type = self.detect_api_type(ollama_host)
         
+        # Get embedding API settings
+        if self.use_same_embedding_api_checkbox.isChecked():
+            embedding_host = ollama_host
+            embedding_api_type = api_type
+        else:
+            embedding_host = self.embedding_api_url_edit.text().rstrip("/")
+            emb_provider = self.embedding_api_provider_combo.currentText()
+            if emb_provider == "Ollama":
+                embedding_api_type = "ollama"
+            else:
+                embedding_api_type = "openai"
+        
         # Create and start worker
         self.index_worker = IndexWorker(self.smart_search_folder, include_subfolders, ollama_host, 
-                                        vision_model, embedding_model, api_type)
+                                        vision_model, embedding_model, api_type,
+                                        embedding_host, embedding_api_type)
         self.index_worker.progress_update.connect(self.ss_on_progress_update)
         self.index_worker.progress_info.connect(self.ss_on_progress_info)
         self.index_worker.indexing_finished.connect(self.ss_on_indexing_finished)
         self.index_worker.error_occurred.connect(self.ss_on_error)
         self.index_worker.start()
         
-        logger.debug(f"IndexWorker started with api_type: {api_type}")
+        logger.debug(f"IndexWorker started with api_type: {api_type}, embedding_host: {embedding_host}, embedding_api_type: {embedding_api_type}")
     
     def ss_stop_indexing(self):
         """Stop the indexing process."""
@@ -1912,16 +2057,29 @@ class ImageFilterApp(QWidget):
         else:  # Auto Detect
             api_type = self.detect_api_type(ollama_host)
         
+        # Get embedding API settings
+        if self.use_same_embedding_api_checkbox.isChecked():
+            embedding_host = ollama_host
+            embedding_api_type = api_type
+        else:
+            embedding_host = self.embedding_api_url_edit.text().rstrip("/")
+            emb_provider = self.embedding_api_provider_combo.currentText()
+            if emb_provider == "Ollama":
+                embedding_api_type = "ollama"
+            else:
+                embedding_api_type = "openai"
+        
         # Create and start search worker with distance threshold
         self.search_worker = SearchWorker(query, limit=50, ollama_host=ollama_host, 
                                           distance_threshold=distance_threshold,
-                                          embedding_model=embedding_model, api_type=api_type)
+                                          embedding_model=embedding_model, api_type=api_type,
+                                          embedding_host=embedding_host, embedding_api_type=embedding_api_type)
         self.search_worker.status_update.connect(self.ss_on_search_status)
         self.search_worker.search_complete.connect(self.ss_on_search_complete)
         self.search_worker.search_error.connect(self.ss_on_search_error)
         self.search_worker.start()
         
-        logger.debug(f"SearchWorker started with query: {query}, threshold: {distance_threshold}, api_type: {api_type}")
+        logger.debug(f"SearchWorker started with query: {query}, threshold: {distance_threshold}, embedding_host: {embedding_host}, embedding_api_type: {embedding_api_type}")
     
     def ss_on_search_status(self, message: str):
         """Handle search status update."""

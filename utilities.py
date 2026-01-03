@@ -207,10 +207,22 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
         url = urljoin(base_url, "/api/generate")
         payload = {
             "model": model_name,
-            "prompt": f"Analyze the provided image carefully. Does this image contain a {user_prompt_object}? Please answer with only 'YES' or 'NO'.",
+            "prompt": f"""You are an image classification assistant. Your task is to determine if an image matches a specific description.
+
+Description to match: "{user_prompt_object}"
+
+Analyze the image carefully and determine if it clearly matches or relates to the description above.
+
+IMPORTANT RULES:
+1. Only answer "YES" if the image CLEARLY and DIRECTLY matches the description.
+2. Answer "NO" if the image does not match, is unrelated, or only loosely/tangentially related.
+3. When in doubt, answer "NO".
+4. Your response must be ONLY the word "YES" or "NO" with no other text or explanation.
+
+Your answer:""",
             "images": [image_base64],
             "stream": False,
-            "options": {"temperature": temp}
+            "options": {"temperature": min(temp, 0.3)}  # Lower temperature for more consistent answers
         }
         try:
             response = requester.post(
@@ -223,17 +235,12 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
             answer = data.get("response", "").strip().upper()
             # Debug: แสดงคำตอบจาก API
             print(f"[DEBUG] API Response: '{answer}'")
-            # ปรับ logic: ตรวจสอบว่าคำตอบขึ้นต้นด้วย YES หรือมี YES เป็นคำแรก
-            # หรือตอบ YES โดยไม่มี NO นำหน้า
-            answer_words = answer.split()
-            if answer_words:
-                first_word = answer_words[0].strip('.,!?')
-                is_yes = first_word == "YES" or (first_word.startswith("YES") and not first_word.startswith("NO"))
-                # ถ้าคำแรกไม่ชัด ให้ตรวจสอบว่ามี YES อยู่และไม่มี NO อยู่
-                if not is_yes:
-                    is_yes = "YES" in answer and "NO" not in answer
-                return is_yes
-            return False
+            # Strict logic: ต้องขึ้นต้นด้วย YES และต้องไม่มี NO อยู่ในคำตอบ
+            answer_clean = answer.replace(",", " ").replace(".", " ").replace("!", " ").replace("?", " ")
+            first_word = answer_clean.split()[0] if answer_clean.split() else ""
+            # ต้องเป็น YES ที่ชัดเจน และไม่มี NO อยู่ในคำตอบ
+            is_yes = first_word == "YES" and "NO" not in answer_clean
+            return is_yes
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             print(f"Ollama API error: {e}")
             return False
@@ -243,6 +250,19 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
         headers = {
             "Content-Type": "application/json"
         }
+        prompt_text = f"""You are an image classification assistant. Your task is to determine if an image matches a specific description.
+
+Description to match: "{user_prompt_object}"
+
+Analyze the image carefully and determine if it clearly matches or relates to the description above.
+
+IMPORTANT RULES:
+1. Only answer "YES" if the image CLEARLY and DIRECTLY matches the description.
+2. Answer "NO" if the image does not match, is unrelated, or only loosely/tangentially related.
+3. When in doubt, answer "NO".
+4. Your response must be ONLY the word "YES" or "NO" with no other text or explanation.
+
+Your answer:"""
         payload = {
             "model": model_name,
             "messages": [
@@ -251,7 +271,7 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Analyze the provided image carefully. Does this image contain a {user_prompt_object}? Please answer with only 'YES' or 'NO'."
+                            "text": prompt_text
                         },
                         {
                             "type": "image_url",
@@ -262,7 +282,7 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
                     ]
                 }
             ],
-            "temperature": temp,
+            "temperature": min(temp, 0.3),  # Lower temperature for more consistent answers
             "max_tokens": 10
         }
         try:
@@ -277,16 +297,12 @@ def ask_api_about_image(api_url: str, model_name: str, image_base64: str, user_p
             answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip().upper()
             # Debug: แสดงคำตอบจาก API
             print(f"[DEBUG] OpenAI API Response: '{answer}'")
-            # ปรับ logic: ตรวจสอบว่าคำตอบขึ้นต้นด้วย YES หรือมี YES เป็นคำแรก
-            answer_words = answer.split()
-            if answer_words:
-                first_word = answer_words[0].strip('.,!?')
-                is_yes = first_word == "YES" or (first_word.startswith("YES") and not first_word.startswith("NO"))
-                # ถ้าคำแรกไม่ชัด ให้ตรวจสอบว่ามี YES อยู่และไม่มี NO อยู่
-                if not is_yes:
-                    is_yes = "YES" in answer and "NO" not in answer
-                return is_yes
-            return False
+            # Strict logic: ต้องขึ้นต้นด้วย YES และต้องไม่มี NO อยู่ในคำตอบ
+            answer_clean = answer.replace(",", " ").replace(".", " ").replace("!", " ").replace("?", " ")
+            first_word = answer_clean.split()[0] if answer_clean.split() else ""
+            # ต้องเป็น YES ที่ชัดเจน และไม่มี NO อยู่ในคำตอบ
+            is_yes = first_word == "YES" and "NO" not in answer_clean
+            return is_yes
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             print(f"OpenAI API error: {e}")
             return False

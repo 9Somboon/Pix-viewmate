@@ -6,7 +6,7 @@ from thumbnail_cache import load_cached_thumbnail
 
 
 class ClickableImageLabel(QLabel):
-    clicked = pyqtSignal(str)  # Signal to emit when clicked, passing the image path
+    clicked = pyqtSignal(str, object)  # Signal to emit when clicked, passing image path and modifiers
     
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
@@ -19,11 +19,11 @@ class ClickableImageLabel(QLabel):
         self.original_pixmap = pixmap
         self.update_pixmap()
     
-    def updatePixmapWithSize(self, size):
+    def updatePixmapWithSize(self, size, fast_mode=False):
         # Update the pixmap with a new size using cached thumbnail
         if self.image_path:
             # Use cached thumbnail loading for better performance
-            pixmap = load_cached_thumbnail(self.image_path, size)
+            pixmap = load_cached_thumbnail(self.image_path, size, fast_mode=fast_mode)
             if not pixmap.isNull():
                 self.setPixmap(pixmap)
                 self.setFixedSize(size, size)
@@ -44,11 +44,18 @@ class ClickableImageLabel(QLabel):
                 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.selected = not self.selected
-            self.update_pixmap()
-            # Use macOS-style blue border for selection
-            # self.setStyleSheet("border: 2px solid #007AFF;" if self.selected else "border: 2px solid transparent;")
-            self.clicked.emit(self.image_path)
+            # Get keyboard modifiers
+            modifiers = QApplication.keyboardModifiers()
+            
+            # Don't toggle selection here; let the main window handle it
+            # This allows for shift-click range selection
+            if not (modifiers & Qt.KeyboardModifier.ShiftModifier):
+                # Only toggle if not shift-clicking (normal behavior)
+                self.selected = not self.selected
+                self.update_pixmap()
+            
+            # Emit signal with modifiers so main window can handle shift-click
+            self.clicked.emit(self.image_path, modifiers)
         super().mousePressEvent(event)
         
     def setSelected(self, selected):

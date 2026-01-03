@@ -192,7 +192,8 @@ class IndexWorker(QThread):
 
     def __init__(self, folder_path: str, include_subfolders: bool = True, 
                  ollama_host: str = OLLAMA_HOST, vision_model: str = VISION_MODEL, 
-                 embedding_model: str = EMBEDDING_MODEL, api_type: str = "ollama"):
+                 embedding_model: str = EMBEDDING_MODEL, api_type: str = "ollama",
+                 embedding_host: str = None, embedding_api_type: str = None):
         super().__init__()
         self.folder_path = folder_path
         self.include_subfolders = include_subfolders
@@ -200,10 +201,13 @@ class IndexWorker(QThread):
         self.vision_model = vision_model
         self.embedding_model = embedding_model
         self.api_type = api_type
+        # Use same host/api_type if not specified
+        self.embedding_host = embedding_host if embedding_host else ollama_host
+        self.embedding_api_type = embedding_api_type if embedding_api_type else api_type
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Not paused by default
-        logger.debug(f"IndexWorker initialized with api_type: {api_type}")
+        logger.debug(f"IndexWorker initialized with api_type: {api_type}, embedding_host: {self.embedding_host}, embedding_api_type: {self.embedding_api_type}")
 
     def stop(self):
         """Stop the worker."""
@@ -317,7 +321,7 @@ class IndexWorker(QThread):
                     return (filepath, False, "Stopped by user")
                 
                 # Step 3: Get embedding from Embedding model
-                vector = get_text_embedding(description, self.ollama_host, self.embedding_model, self.api_type)
+                vector = get_text_embedding(description, self.embedding_host, self.embedding_model, self.embedding_api_type)
                 if vector is None:
                     return (filepath, False, "Failed to get embedding")
                 
@@ -399,15 +403,16 @@ class SearchWorker(QThread):
 
     def __init__(self, query: str, limit: int = 20, ollama_host: str = OLLAMA_HOST, 
                  distance_threshold: float = 1.0, embedding_model: str = EMBEDDING_MODEL,
-                 api_type: str = "ollama"):
+                 api_type: str = "ollama", embedding_host: str = None, embedding_api_type: str = None):
         super().__init__()
         self.query = query
         self.limit = limit
-        self.ollama_host = ollama_host
+        # For SearchWorker, we only use embedding, so use embedding_host if provided
+        self.ollama_host = embedding_host if embedding_host else ollama_host
         self.distance_threshold = distance_threshold
         self.embedding_model = embedding_model
-        self.api_type = api_type
-        logger.debug(f"SearchWorker initialized with query: {query}, threshold: {distance_threshold}, api_type: {api_type}")
+        self.api_type = embedding_api_type if embedding_api_type else api_type
+        logger.debug(f"SearchWorker initialized with query: {query}, threshold: {distance_threshold}, api_type: {self.api_type}, embedding_host: {self.ollama_host}")
 
     def run(self):
         logger.debug("SearchWorker started")

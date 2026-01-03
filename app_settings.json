@@ -1,9 +1,12 @@
 {
   "api_provider": "vLLM",
-  "api_url": "http://192.168.1.190:8000",
+  "api_url": "http://100.97.216.157:8000",
   "selected_model": "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit",
   "temperature": 0.0,
   "max_workers": 4,
-  "vision_model": "hf.co/unsloth/Qwen3-VL-8B-Instruct-GGUF:Q4_K_X",
-  "embedding_model": "hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0"
+  "vision_model": "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit",
+  "embedding_model": "text-embedding-qwen3-embedding-0.6b",
+  "use_same_embedding_api": false,
+  "embedding_api_provider": "LM Studio",
+  "embedding_api_url": "http://192.168.1.125:1234"
 }

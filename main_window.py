@@ -5,7 +5,7 @@ import json
 import logging
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
-                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QDoubleSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox)
+                             QScrollArea, QGridLayout, QMessageBox, QCheckBox, QTabWidget, QComboBox, QSpinBox, QDoubleSpinBox, QFormLayout, QProgressBar, QSlider, QInputDialog, QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QPlainTextEdit)
 from PyQt6.QtGui import QPixmap, QCloseEvent
 from PyQt6.QtCore import Qt, QTimer
 from worker import FilterWorker
@@ -15,6 +15,7 @@ from selectable_grid_widget import SelectableGridWidget
 from utilities import embed_keywords_in_exif
 from smart_search_worker import IndexWorker, SearchWorker
 from auto_tag_worker import AutoTagWorker
+from image_rating_worker import RatingWorker
 from thumbnail_cache import load_cached_thumbnail, get_thumbnail_cache
 from config import OLLAMA_HOST
 
@@ -104,19 +105,24 @@ class ImageFilterApp(QWidget):
         # Auto-Tag worker
         self.auto_tag_worker = None
         
+        # Rating worker
+        self.rating_worker = None
+        self.rating_results = []  # Store rating results
+        
         # Thumbnail resize debounce timer
         self.thumbnail_resize_timer = QTimer()
         self.thumbnail_resize_timer.setSingleShot(True)
         self.thumbnail_resize_timer.timeout.connect(self._apply_high_quality_thumbnails)
         self.pending_thumbnail_size = 256
 
-        # Tabs
         self.tabs = QTabWidget()
         self.main_tab = QWidget()
         self.smart_search_tab = QWidget()
+        self.rating_tab = QWidget()
         self.settings_tab = QWidget()
         self.tabs.addTab(self.main_tab, "Main")
         self.tabs.addTab(self.smart_search_tab, "Smart Search")
+        self.tabs.addTab(self.rating_tab, "Rating")
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Main tab layout
@@ -431,6 +437,203 @@ class ImageFilterApp(QWidget):
         smart_search_layout.addLayout(ss_strictness_layout)
         smart_search_layout.addWidget(self.ss_scroll_area)
         smart_search_layout.addLayout(ss_bottom_layout)
+
+        # ============ Rating Tab Layout ============
+        rating_layout = QVBoxLayout(self.rating_tab)
+        rating_layout.setContentsMargins(20, 20, 20, 20)
+        rating_layout.setSpacing(15)
+        
+        # Folder selection for rating
+        rt_folder_layout = QHBoxLayout()
+        rt_folder_layout.setSpacing(10)
+        self.rt_browse_btn = QPushButton("Browse Folder")
+        self.rt_browse_btn.clicked.connect(self.rt_browse_folder)
+        self.rt_folder_label = QLabel("No folder selected")
+        self.rt_folder_label.setWordWrap(True)
+        self.rt_folder_label.setMinimumWidth(200)
+        self.rt_include_subfolder_checkbox = QCheckBox("Include Subfolders")
+        self.rt_include_subfolder_checkbox.setChecked(True)
+        rt_folder_layout.addWidget(self.rt_browse_btn)
+        rt_folder_layout.addWidget(self.rt_folder_label)
+        rt_folder_layout.addWidget(self.rt_include_subfolder_checkbox)
+        rt_folder_layout.addStretch()
+        
+        # Rating controls
+        rt_control_layout = QHBoxLayout()
+        rt_control_layout.setSpacing(10)
+        self.rt_start_btn = QPushButton("🎯 Start Rating")
+        self.rt_start_btn.clicked.connect(self.rt_start_rating)
+        self.rt_pause_btn = QPushButton("Pause")
+        self.rt_pause_btn.setEnabled(False)
+        self.rt_pause_btn.clicked.connect(self.rt_toggle_pause)
+        self.rt_stop_btn = QPushButton("Stop")
+        self.rt_stop_btn.setEnabled(False)
+        self.rt_stop_btn.clicked.connect(self.rt_stop_rating)
+        rt_control_layout.addWidget(self.rt_start_btn)
+        rt_control_layout.addWidget(self.rt_pause_btn)
+        rt_control_layout.addWidget(self.rt_stop_btn)
+        rt_control_layout.addSpacing(20)
+        
+        # Temperature control
+        rt_control_layout.addWidget(QLabel("Temp:"))
+        self.rt_temp_slider = QSlider(Qt.Orientation.Horizontal)
+        self.rt_temp_slider.setMinimum(0)
+        self.rt_temp_slider.setMaximum(10)
+        self.rt_temp_slider.setValue(3)  # Default 0.3
+        self.rt_temp_slider.setFixedWidth(100)
+        self.rt_temp_slider.valueChanged.connect(self.rt_update_temp_label)
+        self.rt_temp_label = QLabel("0.3")
+        self.rt_temp_label.setMinimumWidth(30)
+        rt_control_layout.addWidget(self.rt_temp_slider)
+        rt_control_layout.addWidget(self.rt_temp_label)
+        rt_control_layout.addStretch()
+        
+        # Custom Prompt Template (collapsible)
+        rt_prompt_group = QGroupBox("📝 Custom Prompt Template (click to expand)")
+        rt_prompt_group.setCheckable(True)
+        rt_prompt_group.setChecked(False)
+        rt_prompt_layout = QVBoxLayout(rt_prompt_group)
+        
+        from image_rating_worker import RATING_PROMPT
+        self.rt_prompt_edit = QPlainTextEdit()
+        self.rt_prompt_edit.setPlainText(RATING_PROMPT)
+        self.rt_prompt_edit.setMinimumHeight(150)
+        self.rt_prompt_edit.setMaximumHeight(300)
+        self.rt_reset_prompt_btn = QPushButton("Reset to Default")
+        self.rt_reset_prompt_btn.clicked.connect(self.rt_reset_prompt)
+        
+        rt_prompt_layout.addWidget(self.rt_prompt_edit)
+        rt_prompt_layout.addWidget(self.rt_reset_prompt_btn)
+        
+        # Progress
+        rt_progress_layout = QHBoxLayout()
+        self.rt_progress_bar = QProgressBar()
+        self.rt_progress_bar.setVisible(False)
+        self.rt_progress_info = QLabel("")
+        self.rt_progress_info.setWordWrap(True)
+        rt_progress_layout.addWidget(self.rt_progress_bar)
+        rt_progress_layout.addSpacing(10)
+        rt_progress_layout.addWidget(self.rt_progress_info)
+        
+        # Status
+        self.rt_status_label = QLabel("Ready. Select a folder and click 'Start Rating'.")
+        self.rt_status_label.setWordWrap(True)
+        self.rt_status_label.setObjectName("status")
+        
+        # Filter controls
+        rt_filter_layout = QHBoxLayout()
+        rt_filter_layout.setSpacing(10)
+        
+        self.rt_filter_combo = QComboBox()
+        self.rt_filter_combo.addItems(["All", "KEEP (≥7)", "REVIEW (5-6.9)", "DELETE (<5)"])
+        self.rt_filter_combo.currentTextChanged.connect(self.rt_filter_results)
+        
+        rt_filter_layout.addWidget(QLabel("Filter:"))
+        rt_filter_layout.addWidget(self.rt_filter_combo)
+        rt_filter_layout.addSpacing(20)
+        
+        rt_filter_layout.addWidget(QLabel("Min Score:"))
+        self.rt_min_score_slider = QSlider(Qt.Orientation.Horizontal)
+        self.rt_min_score_slider.setMinimum(0)
+        self.rt_min_score_slider.setMaximum(100)
+        self.rt_min_score_slider.setValue(0)
+        self.rt_min_score_slider.setFixedWidth(150)
+        self.rt_min_score_slider.valueChanged.connect(self.rt_filter_results)
+        self.rt_min_score_label = QLabel("0.0")
+        rt_filter_layout.addWidget(self.rt_min_score_slider)
+        rt_filter_layout.addWidget(self.rt_min_score_label)
+        rt_filter_layout.addSpacing(20)
+        
+        self.rt_export_btn = QPushButton("📥 Export CSV")
+        self.rt_export_btn.clicked.connect(self.rt_export_csv)
+        self.rt_clear_cache_btn = QPushButton("🗑️ Clear Cache")
+        self.rt_clear_cache_btn.clicked.connect(self.rt_clear_cache)
+        rt_filter_layout.addWidget(self.rt_export_btn)
+        rt_filter_layout.addWidget(self.rt_clear_cache_btn)
+        rt_filter_layout.addStretch()
+        
+        # Results table with preview (horizontal split)
+        rt_content_layout = QHBoxLayout()
+        
+        # Results table (left side)
+        self.rt_table = QTableWidget()
+        self.rt_table.setColumnCount(10)  # Added Defects column
+        self.rt_table.setHorizontalHeaderLabels([
+            "Filename", "Overall", "Tech", "Comp", "Comm", "Uniq", "Edit", "Defects", "Rec", "Path"
+        ])
+        self.rt_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rt_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.rt_table.setSortingEnabled(True)
+        self.rt_table.setAlternatingRowColors(True)
+        self.rt_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.rt_table.customContextMenuRequested.connect(self.rt_show_context_menu)
+        self.rt_table.clicked.connect(self.rt_on_table_click)
+        
+        # Set column widths
+        header = self.rt_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Filename
+        for i in range(1, 7):  # Score columns
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        # Defects column - fixed width to prevent overflow
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
+        self.rt_table.setColumnWidth(7, 120)  # Fixed 120px for Defects
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)  # Rec
+        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)  # Path
+        
+        rt_content_layout.addWidget(self.rt_table, 3)  # Table takes 3/4
+        
+        # Preview panel (right side)
+        rt_preview_layout = QVBoxLayout()
+        self.rt_preview_label = QLabel("Select an image to preview")
+        self.rt_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.rt_preview_label.setMinimumSize(300, 300)
+        self.rt_preview_label.setMaximumWidth(400)
+        self.rt_preview_label.setStyleSheet("border: 1px solid #ccc; border-radius: 5px; background: #f5f5f5;")
+        self.rt_preview_label.setScaledContents(False)
+        
+        self.rt_preview_info = QLabel("")
+        self.rt_preview_info.setWordWrap(True)
+        self.rt_preview_info.setMaximumWidth(400)
+        
+        rt_preview_layout.addWidget(self.rt_preview_label)
+        rt_preview_layout.addWidget(self.rt_preview_info)
+        rt_preview_layout.addStretch()
+        
+        rt_content_layout.addLayout(rt_preview_layout, 1)  # Preview takes 1/4
+        
+        # Bottom actions
+        rt_action_layout = QHBoxLayout()
+        rt_action_layout.setSpacing(10)
+        self.rt_selected_label = QLabel("Selected: 0")
+        self.rt_move_approved_btn = QPushButton("✅ Move to Approved")
+        self.rt_move_approved_btn.clicked.connect(lambda: self.rt_move_selected("approved"))
+        self.rt_move_review_btn = QPushButton("🔍 Move to Review")
+        self.rt_move_review_btn.clicked.connect(lambda: self.rt_move_selected("review"))
+        self.rt_delete_btn = QPushButton("🗑️ Delete Selected")
+        self.rt_delete_btn.clicked.connect(self.rt_delete_selected)
+        self.rt_rerate_btn = QPushButton("🔄 Re-rate Selected")
+        self.rt_rerate_btn.clicked.connect(self.rt_rerate_selected)
+        
+        rt_action_layout.addWidget(self.rt_selected_label)
+        rt_action_layout.addStretch()
+        rt_action_layout.addWidget(self.rt_move_approved_btn)
+        rt_action_layout.addWidget(self.rt_move_review_btn)
+        rt_action_layout.addWidget(self.rt_delete_btn)
+        rt_action_layout.addWidget(self.rt_rerate_btn)
+        
+        # Connect table selection change
+        self.rt_table.selectionModel().selectionChanged.connect(self.rt_update_selection_count)
+        self.rt_table.selectionModel().selectionChanged.connect(self.rt_on_selection_changed)
+        
+        # Assemble Rating tab
+        rating_layout.addLayout(rt_folder_layout)
+        rating_layout.addLayout(rt_control_layout)
+        rating_layout.addWidget(rt_prompt_group)
+        rating_layout.addLayout(rt_progress_layout)
+        rating_layout.addWidget(self.rt_status_label)
+        rating_layout.addLayout(rt_filter_layout)
+        rating_layout.addLayout(rt_content_layout)  # Changed from addWidget to addLayout
+        rating_layout.addLayout(rt_action_layout)
 
         # Settings tab layout
         # Main layout for settings tab
@@ -2205,3 +2408,459 @@ class ImageFilterApp(QWidget):
         # Calculate and show threshold value
         threshold = 1.5 - (value - 1) * (1.5 - 0.3) / 9
         self.ss_strictness_label.setText(f"{label} ({threshold:.2f})")
+
+    # ============ Rating Tab Methods ============
+    
+    def rt_browse_folder(self):
+        """Browse for folder to rate."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
+        if folder:
+            self.rt_folder_label.setText(folder)
+    
+    def rt_start_rating(self):
+        """Start the rating process."""
+        folder = self.rt_folder_label.text()
+        if folder == "No folder selected" or not os.path.isdir(folder):
+            QMessageBox.warning(self, "No Folder", "Please select a valid folder.")
+            return
+        
+        # Check API connection
+        api_url = self.api_url_edit.text().rstrip("/")
+        api_provider = self.api_provider_combo.currentText()
+        
+        if api_provider == "Ollama":
+            api_type = "ollama"
+        else:
+            api_type = "openai"
+        
+        # Get vision model from settings
+        vision_model = self.vision_model_edit.text()
+        
+        # Get custom prompt from UI
+        custom_prompt = self.rt_prompt_edit.toPlainText().strip()
+        
+        # Create and start worker
+        self.rating_worker = RatingWorker(
+            folder_path=folder,
+            include_subfolders=self.rt_include_subfolder_checkbox.isChecked(),
+            api_url=api_url,
+            vision_model=vision_model,
+            api_type=api_type,
+            temperature=self.rt_temp_slider.value() / 10,  # Convert slider value to 0.0-1.0
+            custom_prompt=custom_prompt if custom_prompt else None
+        )
+        
+        # Connect signals
+        self.rating_worker.progress_update.connect(self.rt_on_progress_update)
+        self.rating_worker.progress_info.connect(self.rt_on_progress_info)
+        self.rating_worker.image_rated.connect(self.rt_on_image_rated)
+        self.rating_worker.rating_finished.connect(self.rt_on_rating_finished)
+        self.rating_worker.error_occurred.connect(self.rt_on_error)
+        
+        # Update UI
+        self.rt_start_btn.setEnabled(False)
+        self.rt_pause_btn.setEnabled(True)
+        self.rt_stop_btn.setEnabled(True)
+        self.rt_progress_bar.setVisible(True)
+        self.rt_progress_bar.setValue(0)
+        self.rt_table.setRowCount(0)  # Clear table
+        self.rating_results = []
+        
+        self.rating_worker.start()
+    
+    def rt_toggle_pause(self):
+        """Toggle pause/resume."""
+        if self.rating_worker:
+            if self.rt_pause_btn.text() == "Pause":
+                self.rating_worker.pause()
+                self.rt_pause_btn.setText("Resume")
+            else:
+                self.rating_worker.resume()
+                self.rt_pause_btn.setText("Pause")
+    
+    def rt_stop_rating(self):
+        """Stop the rating process."""
+        if self.rating_worker:
+            self.rating_worker.stop()
+    
+    def rt_on_progress_update(self, message: str):
+        """Handle progress update."""
+        self.rt_status_label.setText(message)
+    
+    def rt_on_progress_info(self, current: int, total: int, eta: float):
+        """Handle progress info update."""
+        if total > 0:
+            self.rt_progress_bar.setMaximum(total)
+            self.rt_progress_bar.setValue(current)
+            
+            eta_str = f"{int(eta // 60)}m {int(eta % 60)}s" if eta > 60 else f"{int(eta)}s"
+            self.rt_progress_info.setText(f"{current}/{total} | ETA: {eta_str}")
+    
+    def rt_on_image_rated(self, result: dict):
+        """Handle single image rated."""
+        self.rating_results.append(result)
+        self._add_result_to_table(result)
+    
+    def _add_result_to_table(self, result: dict):
+        """Add a single result to the table."""
+        row = self.rt_table.rowCount()
+        self.rt_table.insertRow(row)
+        
+        # Filename
+        self.rt_table.setItem(row, 0, QTableWidgetItem(result.get('filename', '')))
+        
+        if result.get('success'):
+            # Scores
+            self.rt_table.setItem(row, 1, QTableWidgetItem(f"{result.get('overall', 0):.1f}"))
+            self.rt_table.setItem(row, 2, QTableWidgetItem(f"{result.get('technical', 0):.0f}"))
+            self.rt_table.setItem(row, 3, QTableWidgetItem(f"{result.get('composition', 0):.0f}"))
+            self.rt_table.setItem(row, 4, QTableWidgetItem(f"{result.get('commercial', 0):.0f}"))
+            self.rt_table.setItem(row, 5, QTableWidgetItem(f"{result.get('uniqueness', 0):.0f}"))
+            self.rt_table.setItem(row, 6, QTableWidgetItem(f"{result.get('editorial', 0):.0f}"))
+            
+            # Defects column (column 7)
+            defects = result.get('defects', [])
+            if isinstance(defects, list) and defects:
+                defects_text = ", ".join(defects[:3])  # Show max 3 defects
+                if len(defects) > 3:
+                    defects_text += f" (+{len(defects)-3})"
+                defects_item = QTableWidgetItem(defects_text)
+                defects_item.setBackground(Qt.GlobalColor.red)
+            else:
+                defects_item = QTableWidgetItem("✓ None")
+                defects_item.setBackground(Qt.GlobalColor.green)
+            self.rt_table.setItem(row, 7, defects_item)
+            
+            # Recommendation (column 8)
+            self.rt_table.setItem(row, 8, QTableWidgetItem(result.get('recommendation', '')))
+            
+            # Color code recommendation
+            rec = result.get('recommendation', '')
+            rec_item = self.rt_table.item(row, 8)
+            if rec == 'KEEP':
+                rec_item.setBackground(Qt.GlobalColor.green)
+            elif rec == 'REVIEW':
+                rec_item.setBackground(Qt.GlobalColor.yellow)
+            elif rec == 'DELETE':
+                rec_item.setBackground(Qt.GlobalColor.red)
+        else:
+            self.rt_table.setItem(row, 1, QTableWidgetItem("ERR"))
+            for i in range(2, 9):
+                self.rt_table.setItem(row, i, QTableWidgetItem("-"))
+        
+        # Path (column 9)
+        self.rt_table.setItem(row, 9, QTableWidgetItem(result.get('filepath', '')))
+    
+    def rt_on_rating_finished(self, results: list):
+        """Handle rating finished."""
+        self.rt_start_btn.setEnabled(True)
+        self.rt_pause_btn.setEnabled(False)
+        self.rt_stop_btn.setEnabled(False)
+        self.rt_pause_btn.setText("Pause")
+        
+        success_count = sum(1 for r in results if r.get('success'))
+        cached_count = sum(1 for r in results if r.get('from_cache'))
+        self.rt_status_label.setText(f"Complete! Total: {len(results)}, Success: {success_count}, From Cache: {cached_count}")
+    
+    def rt_on_error(self, message: str):
+        """Handle error."""
+        QMessageBox.critical(self, "Rating Error", message)
+        self.rt_start_btn.setEnabled(True)
+        self.rt_pause_btn.setEnabled(False)
+        self.rt_stop_btn.setEnabled(False)
+    
+    def rt_filter_results(self):
+        """Filter results based on combo and slider."""
+        filter_type = self.rt_filter_combo.currentText()
+        min_score = self.rt_min_score_slider.value() / 10
+        self.rt_min_score_label.setText(f"{min_score:.1f}")
+        
+        for row in range(self.rt_table.rowCount()):
+            show = True
+            
+            # Get overall score
+            overall_item = self.rt_table.item(row, 1)
+            if overall_item:
+                try:
+                    overall = float(overall_item.text())
+                except:
+                    overall = 0
+                
+                # Filter by min score
+                if overall < min_score:
+                    show = False
+                
+                # Filter by type
+                if show and filter_type != "All":
+                    rec_item = self.rt_table.item(row, 7)
+                    rec = rec_item.text() if rec_item else ""
+                    
+                    if "KEEP" in filter_type and rec != "KEEP":
+                        show = False
+                    elif "REVIEW" in filter_type and rec != "REVIEW":
+                        show = False
+                    elif "DELETE" in filter_type and rec != "DELETE":
+                        show = False
+            
+            self.rt_table.setRowHidden(row, not show)
+    
+    def rt_export_csv(self):
+        """Export results to CSV."""
+        if not self.rating_results:
+            QMessageBox.warning(self, "No Data", "No rating results to export.")
+            return
+        
+        filepath, _ = QFileDialog.getSaveFileName(self, "Export CSV", "", "CSV Files (*.csv)")
+        if not filepath:
+            return
+        
+        import csv
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'filepath', 'filename', 'overall', 'technical', 'composition', 
+                'commercial', 'uniqueness', 'editorial', 'recommendation', 
+                'categories', 'notes', 'from_cache'
+            ])
+            
+            for r in self.rating_results:
+                if r.get('success'):
+                    writer.writerow([
+                        r.get('filepath', ''),
+                        r.get('filename', ''),
+                        r.get('overall', 0),
+                        r.get('technical', 0),
+                        r.get('composition', 0),
+                        r.get('commercial', 0),
+                        r.get('uniqueness', 0),
+                        r.get('editorial', 0),
+                        r.get('recommendation', ''),
+                        ', '.join(r.get('categories', [])),
+                        r.get('notes', ''),
+                        r.get('from_cache', False)
+                    ])
+        
+        QMessageBox.information(self, "Export Complete", f"Results exported to:\n{filepath}")
+    
+    def rt_update_selection_count(self):
+        """Update selected count label."""
+        count = len(self.rt_table.selectionModel().selectedRows())
+        self.rt_selected_label.setText(f"Selected: {count}")
+    
+    def rt_move_selected(self, folder_type: str):
+        """Move selected images to a folder."""
+        selected_rows = self.rt_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select images to move.")
+            return
+        
+        # Ask for destination folder
+        dest_folder = QFileDialog.getExistingDirectory(self, f"Select {folder_type.title()} Folder")
+        if not dest_folder:
+            return
+        
+        import shutil
+        import lancedb_manager
+        
+        moved = 0
+        for index in selected_rows:
+            row = index.row()
+            path_item = self.rt_table.item(row, 8)
+            if path_item:
+                src_path = path_item.text()
+                if os.path.exists(src_path):
+                    filename = os.path.basename(src_path)
+                    dest_path = os.path.join(dest_folder, filename)
+                    try:
+                        shutil.move(src_path, dest_path)
+                        # Update cache with new path
+                        lancedb_manager.delete_rating(src_path)
+                        moved += 1
+                    except Exception as e:
+                        logger.error(f"Failed to move {filename}: {e}")
+        
+        QMessageBox.information(self, "Move Complete", f"Moved {moved} images to:\n{dest_folder}")
+        
+        # Refresh table
+        self.rt_start_rating()
+    
+    def rt_delete_selected(self):
+        """Delete selected images."""
+        selected_rows = self.rt_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select images to delete.")
+            return
+        
+        confirm = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete {len(selected_rows)} selected image(s)? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        
+        import lancedb_manager
+        
+        deleted = 0
+        for index in sorted(selected_rows, reverse=True):
+            row = index.row()
+            path_item = self.rt_table.item(row, 8)
+            if path_item:
+                filepath = path_item.text()
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                        lancedb_manager.delete_rating(filepath)
+                        self.rt_table.removeRow(row)
+                        deleted += 1
+                    except Exception as e:
+                        logger.error(f"Failed to delete {filepath}: {e}")
+        
+        QMessageBox.information(self, "Delete Complete", f"Deleted {deleted} images.")
+    
+    def rt_rerate_selected(self):
+        """Re-rate selected images by removing from cache."""
+        selected_rows = self.rt_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select images to re-rate.")
+            return
+        
+        import lancedb_manager
+        
+        cleared = 0
+        for index in selected_rows:
+            row = index.row()
+            path_item = self.rt_table.item(row, 8)
+            if path_item:
+                filepath = path_item.text()
+                lancedb_manager.delete_rating(filepath)
+                cleared += 1
+        
+        QMessageBox.information(self, "Cache Cleared", f"Cleared {cleared} ratings from cache. Click 'Start Rating' to re-rate.")
+    
+    def rt_clear_cache(self):
+        """Clear all rating cache."""
+        confirm = QMessageBox.question(
+            self, "Clear Cache",
+            "Clear all cached ratings? Images will need to be re-rated.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        
+        import lancedb_manager
+        
+        # Get all ratings and delete
+        ratings = lancedb_manager.get_all_ratings()
+        for r in ratings:
+            lancedb_manager.delete_rating(r.get('filepath', ''))
+        
+        self.rt_table.setRowCount(0)
+        self.rating_results = []
+        QMessageBox.information(self, "Cache Cleared", f"Cleared {len(ratings)} ratings from cache.")
+    
+    def rt_reset_prompt(self):
+        """Reset prompt template to default."""
+        from image_rating_worker import RATING_PROMPT
+        self.rt_prompt_edit.setPlainText(RATING_PROMPT)
+    
+    def rt_update_temp_label(self, value: int):
+        """Update temperature label from slider value."""
+        temp = value / 10
+        self.rt_temp_label.setText(f"{temp:.1f}")
+    
+    def rt_on_table_click(self, index):
+        """Handle table row click to show preview."""
+        self.rt_show_preview_for_row(index.row())
+    
+    def rt_show_preview_for_row(self, row: int):
+        """Show preview for the given row."""
+        if row < 0 or row >= self.rt_table.rowCount():
+            return
+        
+        # Get filepath from the last column
+        path_item = self.rt_table.item(row, 9)  # Path column is now 9
+        if not path_item:
+            return
+        
+        filepath = path_item.text()
+        if not os.path.exists(filepath):
+            self.rt_preview_label.setText("Image not found")
+            self.rt_preview_info.setText("")
+            return
+        
+        # Load and display preview
+        pixmap = QPixmap(filepath)
+        if pixmap.isNull():
+            self.rt_preview_label.setText("Cannot load image")
+            return
+        
+        # Scale to fit preview area
+        scaled = pixmap.scaled(380, 380, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.rt_preview_label.setPixmap(scaled)
+        
+        # Show info
+        filename = os.path.basename(filepath)
+        overall = self.rt_table.item(row, 1).text() if self.rt_table.item(row, 1) else "?"
+        defects = self.rt_table.item(row, 7).text() if self.rt_table.item(row, 7) else "None"
+        rec = self.rt_table.item(row, 8).text() if self.rt_table.item(row, 8) else "?"
+        
+        self.rt_preview_info.setText(f"<b>{filename}</b><br>Score: {overall} | {rec}<br>Defects: {defects}")
+    
+    def rt_on_selection_changed(self, selected, deselected):
+        """Handle selection change (for arrow key navigation)."""
+        indexes = selected.indexes()
+        if indexes:
+            self.rt_show_preview_for_row(indexes[0].row())
+    
+    def rt_show_context_menu(self, position):
+        """Show context menu for table rows."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        
+        menu = QMenu()
+        reveal_action = QAction("📂 Reveal in Finder", self)
+        reveal_action.triggered.connect(self.rt_reveal_in_finder)
+        menu.addAction(reveal_action)
+        
+        open_action = QAction("🖼️ Open Image", self)
+        open_action.triggered.connect(self.rt_open_image)
+        menu.addAction(open_action)
+        
+        menu.exec(self.rt_table.viewport().mapToGlobal(position))
+    
+    def rt_reveal_in_finder(self):
+        """Reveal selected image in Finder."""
+        import subprocess
+        
+        selected = self.rt_table.selectedItems()
+        if not selected:
+            return
+        
+        row = selected[0].row()
+        path_item = self.rt_table.item(row, 9)
+        if not path_item:
+            return
+        
+        filepath = path_item.text()
+        if os.path.exists(filepath):
+            subprocess.run(["open", "-R", filepath])
+    
+    def rt_open_image(self):
+        """Open selected image with default app."""
+        import subprocess
+        
+        selected = self.rt_table.selectedItems()
+        if not selected:
+            return
+        
+        row = selected[0].row()
+        path_item = self.rt_table.item(row, 9)
+        if not path_item:
+            return
+        
+        filepath = path_item.text()
+        if os.path.exists(filepath):
+            subprocess.run(["open", filepath])

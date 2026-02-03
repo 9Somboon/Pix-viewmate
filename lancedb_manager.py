@@ -274,3 +274,203 @@ def clear_database():
         _table = None
     except Exception as e:
         print(f"Error clearing database: {e}")
+
+
+# ============ Rating Cache Functions ============
+
+RATING_TABLE_NAME = "image_ratings"
+_rating_table = None
+
+
+def get_rating_schema() -> pa.Schema:
+    """
+    Create PyArrow schema for the ratings table.
+    """
+    return pa.schema([
+        pa.field("filepath", pa.string()),
+        pa.field("technical", pa.float32()),
+        pa.field("composition", pa.float32()),
+        pa.field("commercial", pa.float32()),
+        pa.field("uniqueness", pa.float32()),
+        pa.field("editorial", pa.float32()),
+        pa.field("overall", pa.float32()),
+        pa.field("recommendation", pa.string()),
+        pa.field("categories", pa.string()),  # JSON string
+        pa.field("defects", pa.string()),  # JSON string of defects list
+        pa.field("notes", pa.string()),
+        pa.field("rated_at", pa.string()),  # ISO timestamp
+        pa.field("prompt_hash", pa.string())  # Hash of prompt used for rating
+    ])
+
+
+def get_rating_table():
+    """
+    Get or create the ratings table.
+    Returns the table object.
+    """
+    global _rating_table
+    if _rating_table is None:
+        db = connect()
+        if RATING_TABLE_NAME in db.table_names():
+            _rating_table = db.open_table(RATING_TABLE_NAME)
+        else:
+            schema = get_rating_schema()
+            _rating_table = db.create_table(RATING_TABLE_NAME, schema=schema)
+            logger.info("Created new ratings table")
+    return _rating_table
+
+
+def get_all_rated_filepaths() -> set:
+    """
+    Get all rated filepaths from the database.
+    Returns a set for O(1) lookup performance.
+    """
+    table = get_rating_table()
+    try:
+        arrow_table = table.to_arrow()
+        if arrow_table.num_rows == 0:
+            return set()
+        
+        filepath_column = arrow_table.column("filepath")
+        filepaths = set(filepath_column.to_pylist())
+        logger.info(f"Loaded {len(filepaths)} existing ratings from database")
+        return filepaths
+    except Exception as e:
+        logger.error(f"Error getting rated filepaths: {e}")
+        return set()
+
+
+def get_rating(filepath: str) -> dict | None:
+    """
+    Get existing rating for a file.
+    
+    Args:
+        filepath: Absolute path to the image file
+        
+    Returns:
+        Rating dict or None if not found
+    """
+    table = get_rating_table()
+    try:
+        result = table.search().where(f"filepath = '{filepath}'", prefilter=True).limit(1).to_list()
+        if result:
+            import json
+            rating = result[0]
+            # Parse categories JSON string back to list
+            if rating.get('categories'):
+                try:
+                    rating['categories'] = json.loads(rating['categories'])
+                except:
+                    rating['categories'] = []
+            return rating
+        return None
+    except Exception as e:
+        logger.error(f"Error getting rating: {e}")
+        return None
+
+
+def save_rating(rating_data: dict, prompt_hash: str = "") -> bool:
+    """
+    Save or update rating for an image.
+    
+    Args:
+        rating_data: Dict with filepath, scores, recommendation, etc.
+        prompt_hash: Hash of the prompt used for rating
+        
+    Returns:
+        True if successful
+    """
+    import json
+    from datetime import datetime
+    
+    table = get_rating_table()
+    filepath = rating_data.get('filepath', '')
+    
+    try:
+        # Delete existing if any
+        try:
+            table.delete(f"filepath = '{filepath}'")
+        except:
+            pass
+        
+        # Prepare data
+        categories_json = json.dumps(rating_data.get('categories', []))
+        defects_json = json.dumps(rating_data.get('defects', []))
+        
+        table.add([{
+            "filepath": filepath,
+            "technical": float(rating_data.get('technical', 0)),
+            "composition": float(rating_data.get('composition', 0)),
+            "commercial": float(rating_data.get('commercial', 0)),
+            "uniqueness": float(rating_data.get('uniqueness', 0)),
+            "editorial": float(rating_data.get('editorial', 0)),
+            "overall": float(rating_data.get('overall', 0)),
+            "recommendation": rating_data.get('recommendation', ''),
+            "categories": categories_json,
+            "defects": defects_json,
+            "notes": rating_data.get('notes', ''),
+            "rated_at": datetime.now().isoformat(),
+            "prompt_hash": prompt_hash
+        }])
+        return True
+    except Exception as e:
+        logger.error(f"Error saving rating: {e}")
+        return False
+
+
+def get_all_ratings() -> list:
+    """
+    Get all ratings from the database.
+    
+    Returns:
+        List of rating dicts
+    """
+    import json
+    table = get_rating_table()
+    try:
+        arrow_table = table.to_arrow()
+        if arrow_table.num_rows == 0:
+            return []
+        
+        results = arrow_table.to_pylist()
+        # Parse categories and defects JSON for each result
+        for r in results:
+            if r.get('categories'):
+                try:
+                    r['categories'] = json.loads(r['categories'])
+                except:
+                    r['categories'] = []
+            if r.get('defects'):
+                try:
+                    r['defects'] = json.loads(r['defects'])
+                except:
+                    r['defects'] = []
+        return results
+    except Exception as e:
+        logger.error(f"Error getting all ratings: {e}")
+        return []
+
+
+def delete_rating(filepath: str) -> bool:
+    """
+    Delete rating for a file.
+    """
+    table = get_rating_table()
+    try:
+        table.delete(f"filepath = '{filepath}'")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting rating: {e}")
+        return False
+
+
+def get_rating_count() -> int:
+    """
+    Get total number of rated images.
+    """
+    table = get_rating_table()
+    try:
+        return table.count_rows()
+    except:
+        return 0
+
